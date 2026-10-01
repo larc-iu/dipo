@@ -20,6 +20,7 @@ import torch.nn as nn
 
 from iudex.common.training import raise_on_unexpected_keys
 from iudex.rst.parsers.common.seqgen import empty_tree, gold_edu_source_ranges, reconstruct_text
+from iudex.rst.parsers.common.whitespace import collapse_whitespace
 from iudex.rst.parsers.gen.backbones import BACKBONES
 from iudex.rst.parsers.gen.configuration_gen import GenConfig
 from iudex.rst.parsers.gen.decode import beam_decode, greedy_decode, greedy_decode_batch
@@ -123,6 +124,10 @@ class GenParser(nn.Module):
     def predict_batch_from_texts(self, texts: list[str], *, num_beams: int | None = None) -> list:
         if not texts:
             return []
+        # Training sources are single-space joined; raw newlines are out of
+        # distribution and can be copied as whitespace-only EDUs. A no-op on corpus
+        # text (see common.whitespace).
+        texts = [collapse_whitespace(t) for t in texts]
         effective_beams = int(num_beams if num_beams is not None else self.config.num_beams)
         self.eval()
         if effective_beams > 1:

@@ -14,6 +14,7 @@ from iudex.rst.parsers.common.encoding import (
 )
 from iudex.rst.parsers.common.pointer import PointerAttention
 from iudex.rst.parsers.common.segmentation import Segmenter
+from iudex.rst.parsers.common.whitespace import collapse_whitespace, normalize_whitespace
 from iudex.rst.parsers.dmrst.configuration_dmrst import DMRSTConfig
 
 
@@ -58,6 +59,39 @@ def encode_tokens_fixed_window(
     out = torch.cat(pieces, dim=0)
     assert out.shape[0] == seqlen, f"fixed-window encoding produced {out.shape[0]} tokens, expected {seqlen}"
     return out
+
+
+def edus_from_breaks(
+    text: str, char_map: list[int], offsets: list[tuple[int, int]], breaks: list[int]
+) -> tuple[list[tuple[int, int]], list[str]]:
+    """Turn segmenter `breaks` (inclusive end token indices) over the tokenized
+    `normalize_whitespace(text)` into `(edu_mapping, edu_texts)`: token spans
+    `(start, end_exclusive)` and each EDU's text.
+
+    EDU text is sliced from the caller's own `text` rather than decoded from ids:
+    decoding is lossy per-tokenizer (English punctuation spacing under
+    clean_up_tokenization_spaces; XLM-R's SentencePiece drops Persian ZWNJ), which
+    would hand the caller EDUs that do not appear verbatim in the document they
+    passed in (see `predict_both` for the same fix). Only whitespace is rewritten: a
+    line break inside an EDU becomes a space.
+
+    A span of whitespace-only subwords would be an empty EDU (larc-iu/iudex#1), so
+    it is folded into its left neighbor, or its right one if it opens the document.
+    """
+
+    def edu_text(b: int, e: int) -> str:
+        return collapse_whitespace(text[char_map[offsets[b][0]] : char_map[offsets[e - 1][1] - 1] + 1])
+
+    edu_mapping: list[tuple[int, int]] = []
+    prev = 0
+    for end_inclusive in breaks:
+        b, e = prev, end_inclusive + 1
+        if edu_mapping and not (edu_text(b, e) and edu_text(*edu_mapping[-1])):
+            edu_mapping[-1] = (edu_mapping[-1][0], e)
+        else:
+            edu_mapping.append((b, e))
+        prev = e
+    return edu_mapping, [edu_text(b, e) for b, e in edu_mapping]
 
 
 class _LabelClassifier(nn.Module):
@@ -616,7 +650,10 @@ class DMRSTParser(nn.Module):
             raise RuntimeError("predict_from_text requires `cfg.segmentation` to be non-null")
         self.eval()
 
-        enc = self.tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
+        # Encode whitespace-collapsed text (the training distribution; see
+        # common.whitespace) but slice EDUs out of the caller's original text.
+        src_text, char_map = normalize_whitespace(text)
+        enc = self.tokenizer(src_text, add_special_tokens=False, return_offsets_mapping=True)
         ids, offsets = enc["input_ids"], enc["offset_mapping"]
         if len(ids) == 0:
             # A 0-EDU tree is unconstructible (`RstTree.__init__` requires
@@ -627,18 +664,7 @@ class DMRSTParser(nn.Module):
         normed = self.layer_norm(embeddings.float())
 
         breaks = self.segmenter.predict_breaks(normed)
-        # `breaks` are inclusive end token indices. Convert to (start, end_exclusive).
-        edu_mapping: list[tuple[int, int]] = []
-        prev = 0
-        for end_inclusive in breaks:
-            edu_mapping.append((prev, end_inclusive + 1))
-            prev = end_inclusive + 1
-        # Slice the caller's own text rather than decoding ids back to text:
-        # decoding is lossy per-tokenizer (English punctuation spacing under
-        # clean_up_tokenization_spaces; XLM-R's SentencePiece drops Persian
-        # ZWNJ), which would hand the caller EDUs that do not appear verbatim in
-        # the document they passed in. See `predict_both` for the same fix.
-        edu_texts = [text[offsets[b][0]:offsets[e - 1][1]].strip() for b, e in edu_mapping]
+        edu_mapping, edu_texts = edus_from_breaks(text, char_map, offsets, breaks)
 
         if len(edu_mapping) < 2:
             return RstTree.from_parsing_actions([], edu_texts, relation_types=self.config.relation_types)
