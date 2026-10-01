@@ -19,27 +19,27 @@ Encoder-based parsers (`dmrst`, `topdown_biaffine`, `sr_biaffine`):
 - `biaffine.py` — the `DeepBiAffine` span scorer (topdown_biaffine, sr_biaffine).
 - `pointer.py` — `PointerAttention` (dmrst).
 
-Generative parsers (`seq2seq_sr`, `decoder_only_sr`, `seq2seq_sexp`, `decoder_only_sexp`):
+Generative parser `gen` (backbone `decoder_only`|`seq2seq` × serialization `sr`|`sexp`):
 - `seqgen.py` — EDU→token alignment, beam-search primitives, KV-cache reorder, the
-  shift-reduce `ShiftReduceDecodeState`, embedding-gradient masking + head warm-init.
+  shift-reduce `ShiftReduceDecodeState`, head warm-init, word-label vocab.
 - `sexp_constraints.py` — the s-expression pushdown automaton (`SexpDecodingState`) and
-  `GoldEduForcer` (the two sexp parsers).
+  `GoldEduForcer` (the `sexp` serialization).
 - `generative_eval.py` — the shared dev/test eval orchestration (`evaluate_on_dev`),
-  which talks to a parser only through the small `GenerativeParser` Protocol.
+  which talks to `gen` only through the small `GenerativeParser` Protocol.
 
-## Reading the generative parsers (start here)
+## Reading the generative parser (start here)
 
-The four generative parsers are a 2×2: backbone (encoder-decoder `seq2seq_*` vs causal
-`decoder_only_*`) × serialization (shift-reduce `*_sr` vs s-expression `*_sexp`). They are
-four self-contained parsers, not one branchy class (see CLAUDE.md, "generative parsers",
-for why). A productive reading order:
+`gen` is a 2×2 composition: a BACKBONE strategy (encoder-decoder `seq2seq` vs causal
+`decoder_only`) × a SERIALIZATION strategy (shift-reduce `sr` vs s-expression `sexp`),
+selected by config. The two axes never reference each other (see CLAUDE.md,
+"generative parser", for why). A productive reading order:
 
-1. `seq2seq_sr/` — the canonical/reference parser. Read its README and
-   `modeling_seq2seq_sr.py` top-to-bottom first.
-2. `seqgen.py` — the shared decode/alignment/beam machinery the SR parsers lean on.
-3. `decoder_only_sr/` — the same parser on a causal backbone (read it as a delta:
-   single-stream input layout, otherwise identical).
-4. `seq2seq_sexp/` + `sexp_constraints.py` — swap the shift-reduce serialization for a
-   constrained s-expression (the PDA lives in `sexp_constraints.py`).
-5. `decoder_only_sexp/` — the s-expression parser on the causal backbone.
-6. `generative_eval.py` — how all four are evaluated through one Protocol.
+1. `gen/modeling_gen.py` — `GenParser` composes a backbone + a serialization; read the
+   handshake + encode_target/forward/predict flow.
+2. `gen/decode.py` — the single greedy/beam decode core, parameterized over backbone
+   I/O + a serialization state machine + a mask source.
+3. `gen/backbones/{base,decoder_only,seq2seq}.py` — the backbone axis (model, packaging,
+   the causal single stream vs the encoder-decoder compound cache).
+4. `gen/serializations/{base,sr,sexp}.py` + `seqgen.py` / `sexp_constraints.py` — the
+   serialization axis (linearize, loss, the SR state machine / the sexp PDA + forcer).
+5. `generative_eval.py` — how `gen` is evaluated through one Protocol.

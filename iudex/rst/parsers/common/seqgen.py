@@ -1,33 +1,26 @@
-"""Shared utilities for the generative (text-to-tree) RST parsers, i.e. the
-ones that fine-tune a seq2seq or causal LM to emit a linearized tree
-(`seq2seq_sr`, `decoder_only_sr`, `seq2seq_sexp`, `decoder_only_sexp`). These
-helpers are lifted here, rather than duplicated per parser, because they are
-pure, self-contained, and costly to keep in hand-sync across copies:
+"""Shared utilities for the generative (text-to-tree) RST parser `gen`, which
+fine-tunes a seq2seq or causal LM (the `backbone` axis) to emit a linearized tree
+(shift-reduce or s-expression, the `serialization` axis). These helpers are pure,
+self-contained functions the backbone/serialization strategies compose:
 
 - `align_edus_to_tokens`: the EDU to subword tiling that keeps train-time COPY
   substitution in lockstep with the inference copy-every-source-token
-  constraint. The tiling invariant must agree across train and predict in
-  every parser.
-- `reorder_past_key_values`: beam-search KV-cache reordering. Defensive
-  HF-version-compat plumbing, where a future transformers bump otherwise needs
-  the same fix applied in all four parsers or three of them silently rot.
+  constraint. The tiling invariant must agree across train and predict.
+- `reorder_past_key_values`: beam-search KV-cache reordering, defensive
+  HF-version-compat plumbing.
 - `beam_topk_step` / `beam_reorder_needed` / `select_best_beam`: the
   serialization-agnostic beam-search primitives (top-K expansion with the
   dead-beam NaN guard, the reorder-is-a-no-op predicate, and GNMT
-  length-normalized candidate selection). Each parser's `_predict_one_beam`
-  still owns its loop top-to-bottom (mask, state transition, tree
-  reconstruction stay local), but these three subtle, must-stay-in-sync blocks
-  live here so a fix lands once.
-- `reconstruct_text` / `gold_edu_source_ranges` / `empty_tree` /
-  `repair_actions` / `fallback_reduce`: the SR parsers' shared text-reconstruct,
-  gold-range tiling, single-EDU fallback, and action-sequence repair logic.
+  length-normalized candidate selection), consumed by gen's decode core
+  (`gen/decode.py`).
+- `ShiftReduceDecodeState`: the shift-reduce decode automaton.
+- `reconstruct_text` / `gold_edu_source_ranges` / `empty_tree`: text
+  reconstruction, gold-range tiling, and the single-EDU fallback tree.
+- `chunked_cross_entropy`: memory-bounded full-vocab CE (words mode at
+  27-31B scale).
 
 The encoder-based parsers (`dmrst`, `topdown_biaffine`, `sr_biaffine`)
 do not use these; their shared token-encoding lives in `common/encoding.py`.
-
-This functional-helper layer (not inheritance) is the deliberate de-duplication
-seam for the four generative parsers; see CLAUDE.md ("generative parsers") for
-why there is no shared base class.
 """
 
 from dataclasses import dataclass, field
@@ -37,86 +30,83 @@ import torch
 import torch.nn.functional as F
 
 from iudex.common.log import warn
-from iudex.rst.data.tree import (
-    Reduce,
-    RstTree,
-    Shift,
-    ShiftReduceAction,
-    strings_to_actions,
-)
+from iudex.rst.data.tree import RstTree, Shift, ShiftReduceAction
 
-# GNMT length-normalization exponent for beam selection (Wu et al. 2016). Shared
-# default across the four generative parsers' beam loops.
+# GNMT length-normalization exponent for beam selection (Wu et al. 2016), the
+# `select_best_beam` default.
 BEAM_LENGTH_PENALTY_ALPHA = 0.6
 
 
 # -----------------------------------------------------------------
-# Embedding gradients & action-head warm-init
+# Action-head warm-init
 # -----------------------------------------------------------------
 
 
-def mask_old_embedding_gradients(underlying_model: Any, n_old: int) -> tuple[int, int] | None:
-    """Train only the newly-added (id >= n_old) input-embedding rows: keep the
-    full embedding trainable and register a backward hook zeroing the gradient
-    on the pretrained rows [0, n_old). Shared by the four generative parsers,
-    which all add ~100 action tokens via `resize_token_embeddings` and must
-    train only those rows.
-
-    Crucially this never overrides the embedding module's `forward`, so any
-    backbone-specific behavior baked into that forward is preserved. Notably the
-    Gemma family (Gemma, T5Gemma, ...) wraps the lookup in a `*ScaledWordEmbedding`
-    that multiplies by sqrt(hidden). An earlier "carve" scheme monkey-patched the
-    forward to splice a small trainable Parameter for the new rows, which
-    silently dropped that scaling (every input embedding ~34-48x too small) and
-    badly regressed quality on Gemma backbones (invisible on vanilla T5, which
-    has no scaling). The cost of this approach is a dense full-vocab gradient
-    (~1 GB bf16 at 1B scale, transient); Adafactor's factored optimizer state
-    stays negligible.
-
-    `underlying_model` is the PEFT-unwrapped HF model (exposing
-    `get_input_embeddings()`). Encoder/decoder input embeddings are tied (one
-    storage), so hooking the single weight covers both sides. Returns
-    `(n_total, n_new)` for the caller to log, or None when there are no new rows.
-    """
-    weight = underlying_model.get_input_embeddings().weight
-    n_total = weight.shape[0]
-    if n_total <= n_old:
-        return None
-    weight.requires_grad_(True)
-
-    def _zero_old_rows(grad: torch.Tensor) -> torch.Tensor:
-        grad = grad.clone()
-        grad[:n_old] = 0
-        return grad
-
-    weight.register_hook(_zero_old_rows)
-    return n_total, n_total - n_old
-
-
-def warm_init_head(new_linear: torch.nn.Linear, embed_weight: torch.Tensor, full_id_for_head_idx: list[int]) -> None:
+def warm_init_head(new_linear: torch.nn.Linear, unembed_weight: torch.Tensor, full_id_for_head_idx: list[int]) -> None:
     """Warm-init each row of a freshly-built small action head from the matching
-    `embed_tokens` row. The original lm_head was tied to embed_tokens, so row
-    `full_id` of embed_tokens is the "right" unembedding direction for token
-    `full_id`; copying those rows into the small head means the model starts
-    already knowing which hidden direction maps to which token, skipping the
-    training that would otherwise just relearn that alignment. For action tokens
-    whose embed row was freshly created by `resize_token_embeddings` the row is
-    itself random, so this is no worse than an N(0, 0.02) init there (and
-    strictly better for pre-existing tokens like EOS). `full_id_for_head_idx[hi]`
-    is the full-vocab id seeding head row `hi`. Mutates `new_linear.weight`.
+    row of `unembed_weight`, the model's unembedding matrix: pass the OLD
+    lm_head weight when embeddings are untied (large Qwen/Gemma backbones), or
+    the tied `embed_tokens` weight (identical tensor to the lm_head in that
+    case, e.g. Gemma-3/T5Gemma). Row `full_id` of that matrix is the hidden
+    direction the pretrained model maps to token `full_id`; copying those rows
+    into the small head means the model starts already knowing which hidden
+    direction maps to which token, skipping the training that would otherwise
+    just relearn that alignment. For action tokens whose row was freshly
+    created by `resize_token_embeddings` the row is itself random, so this is
+    no worse than an N(0, 0.02) init there (and strictly better for
+    pre-existing tokens like EOS). `full_id_for_head_idx[hi]` is the full-vocab
+    id seeding head row `hi`. Mutates `new_linear.weight`.
 
-    If the tied input embeddings are the wrong width to copy into the head
-    (asymmetric encoder/decoder backbones, e.g. t5gemma-9b-2b: 3584-wide encoder
-    embeddings but a 2304-wide decoder lm_head), fall back to the same N(0, 0.02)
-    init fresh rows would otherwise get rather than crashing on the dim mismatch.
+    If `unembed_weight` is the wrong width to copy into the head (tied input
+    embeddings on asymmetric encoder/decoder backbones, e.g. t5gemma-9b-2b:
+    3584-wide encoder embeddings but a 2304-wide decoder lm_head), fall back to
+    the same N(0, 0.02) init fresh rows would otherwise get rather than
+    crashing on the dim mismatch.
     """
     with torch.no_grad():
-        if embed_weight.shape[-1] != new_linear.weight.shape[-1]:
+        if unembed_weight.shape[-1] != new_linear.weight.shape[-1]:
             new_linear.weight.normal_(mean=0.0, std=0.02)
             return
         for hi, full_id in enumerate(full_id_for_head_idx):
-            src = embed_weight[full_id].to(dtype=new_linear.weight.dtype, device=new_linear.weight.device)
+            src = unembed_weight[full_id].to(dtype=new_linear.weight.dtype, device=new_linear.weight.device)
             new_linear.weight[hi].copy_(src)
+
+
+def relation_to_words(rel: str) -> str:
+    """Natural-language spelling of a relation label for `label_style='words'`:
+    hyphens become spaces so every piece is a clean, space-prefixed pretrained
+    word token (`same-unit` -> `same unit`, `topic-comment` -> `topic comment`).
+    Single-word relations (`elaboration`, `joint`, ...) are unchanged."""
+    return rel.replace("-", " ")
+
+
+def build_word_label_vocab(tokenizer, relation_types, terminator_id=None):
+    """For `label_style='words'`. Maps each (nuc, rel) merge label to the token-id
+    sequence for `" <nuc> <relation words>"` (a leading space so every piece hits
+    a pretrained word row, e.g. `" NS elaboration"` -> `[<space>NS, <space>elaboration]`),
+    and the inverse. The nuclearity marker is the abbreviated `NS`/`SN`/`NN`; the
+    relation words are ordinary pretrained-vocab tokens scored over the full
+    lm_head. Returns `(label_to_ids, ids_to_label)` keyed by (nuc, rel) tuples and
+    by token-id tuples respectively.
+
+    `terminator_id` (a dedicated `<label_end>` id) is appended to every label
+    sequence when set. The decode/reconstruct machinery assumes prefix-free labels;
+    raw relation words are NOT prefix-free (`elaboration` is a prefix of
+    `elaboration-additional`), so without a terminator the longer label is
+    unreachable at decode and mis-parsed at reconstruct. The terminator delimits
+    every label, making the whole set prefix-free by construction (so any unique
+    label set is decodable). None reproduces the pre-terminator (prefix-fragile)
+    encoding."""
+    label_to_ids: dict[tuple[str, str], tuple[int, ...]] = {}
+    ids_to_label: dict[tuple[int, ...], tuple[str, str]] = {}
+    suffix = (int(terminator_id),) if terminator_id is not None else ()
+    for rel, kind in relation_types:
+        nucs = ("NN",) if kind == "multinuc" else ("NS", "SN")
+        for nuc in nucs:
+            ids = tuple(tokenizer(f" {nuc} {relation_to_words(rel)}", add_special_tokens=False)["input_ids"]) + suffix
+            label_to_ids[(nuc, rel)] = ids
+            ids_to_label[ids] = (nuc, rel)
+    return label_to_ids, ids_to_label
 
 
 # -----------------------------------------------------------------
@@ -265,8 +255,8 @@ def beam_topk_step(
     wsj_1118: renormalized -2.5 vs raw -974 for the 3-EDU parse). Raw scoring
     matches the HF generate() default (renormalize_logits is opt-in there) and
     greedy argmax is unaffected either way. The NaN guard stays as a backstop
-    for -inf raw logits. Shared verbatim across the four generative parsers'
-    beam loops (it must stay in sync, the failure mode is silent)."""
+    for -inf raw logits. The mask-AFTER-log_softmax order is the whole point;
+    it lives here so it is defined exactly once (the failure mode is silent)."""
     v = logits.size(-1)
     log_probs = F.log_softmax(logits.float(), dim=-1)
     log_probs = torch.where(legal_mask, log_probs, torch.full_like(log_probs, float("-inf")))
@@ -315,14 +305,14 @@ def select_best_beam(candidates: list[dict], alpha: float = BEAM_LENGTH_PENALTY_
 
 @dataclass
 class ShiftReduceDecodeState:
-    """Bottom-up shift-reduce decode state for the SR generative parsers
-    (`seq2seq_sr`, `decoder_only_sr`), the shift-reduce analogue of the sexp
-    parsers' `SexpDecodingState`. Vocab-agnostic: it tracks the source cursor,
-    the constituent-stack size, and the current EDU's COPY count, exposing the
-    four validity predicates and the four transitions that the greedy, beam,
-    and gold-EDU loops share. The parser maps the predicates to its own action
-    head indices and classifies emitted ids back into the four action kinds, so
-    the vocab-specific glue stays per-parser while the automaton lives here.
+    """Bottom-up shift-reduce decode state for `gen`'s `sr` serialization, the
+    shift-reduce analogue of the `sexp` serialization's `SexpDecodingState`.
+    Vocab-agnostic: it tracks the source cursor, the constituent-stack size, and
+    the current EDU's COPY count, exposing the four validity predicates and the
+    four transitions that the greedy, beam, and gold-EDU loops share. The SR
+    serialization maps the predicates into its scoring space and classifies
+    emitted ids back into action kinds (`serializations/sr.py`), so the
+    vocab-specific glue stays there while the automaton lives here.
 
     The state machine over actions {COPY, SHIFT, REDUCE, EOS}:
       COPY   advances the source cursor and extends the current EDU.
@@ -340,10 +330,16 @@ class ShiftReduceDecodeState:
     edu_start: int = 0
     pred_edu_ranges: list[tuple[int, int]] = field(default_factory=list)
     done: bool = False
+    # Multi-token relation-word labels (label_style='words'); empty in token mode,
+    # where a REDUCE is a single action id the parser masks directly. Prefix-free.
+    word_label_ids: frozenset = field(default_factory=frozenset)
+    # In-progress label prefix; () when not mid-label. Words mode only. A REDUCE is
+    # deferred until the label completes (see `words_step_full`).
+    label_cursor: tuple = ()
 
     def clone(self) -> "ShiftReduceDecodeState":
         """Deep-enough copy for beam expansion (the only mutable field is the
-        ranges list)."""
+        ranges list; `word_label_ids` is immutable and shared)."""
         return ShiftReduceDecodeState(
             source_len=self.source_len,
             min_edu_length=self.min_edu_length,
@@ -353,7 +349,45 @@ class ShiftReduceDecodeState:
             edu_start=self.edu_start,
             pred_edu_ranges=list(self.pred_edu_ranges),
             done=self.done,
+            word_label_ids=self.word_label_ids,
+            label_cursor=self.label_cursor,
         )
+
+    # ---- words mode (label_style='words'): multi-token relation-word labels ----
+
+    def _label_conts(self) -> set[int]:
+        n = len(self.label_cursor)
+        return {seq[n] for seq in self.word_label_ids if len(seq) > n and seq[:n] == self.label_cursor}
+
+    def words_step_full(self, full_id: int, copy_id: int, shift_id: int, end_id: int) -> str:
+        """Advance on a full-vocab id (words mode). A multi-token label defers the
+        REDUCE until the label completes; the label tokens themselves change no SR
+        state. Returns the action kind so the loop can pick the next decoder input:
+        'copy' | 'copy_exhausted' | 'shift' | 'label' | 'reduce' | 'eos' | 'illegal'."""
+        if self.label_cursor:
+            if full_id not in self._label_conts():
+                self.done = True
+                return "illegal"
+            new = self.label_cursor + (full_id,)
+            if new in self.word_label_ids:
+                self.label_cursor = ()
+                self.step_reduce()
+                return "reduce"
+            self.label_cursor = new
+            return "label"
+        if full_id == copy_id:
+            return "copy" if self.step_copy() else "copy_exhausted"
+        if full_id == shift_id:
+            self.step_shift()
+            return "shift"
+        if full_id == end_id:
+            self.step_eos()
+            return "eos"
+        if any(seq and seq[0] == full_id for seq in self.word_label_ids):
+            self.label_cursor = (full_id,)
+            return "label"
+        self.done = True
+        return "illegal"
 
     @property
     def at_end(self) -> bool:
@@ -434,53 +468,55 @@ def empty_tree(relation_types, text: str = "") -> RstTree:
     return RstTree.from_shift_reduce(actions, relation_types=relation_types)
 
 
-def fallback_reduce(reduce_token_map) -> "Reduce | None":
-    """A Reduce action to close an unfinished tree. Prefers NS-elaboration if
-    available, else the first reduce in the vocabulary."""
-    for _token_str, (nuc, rel) in reduce_token_map.items():
-        if (nuc, rel) == ("NS", "elaboration"):
-            return Reduce(nuc=nuc, rel=rel)
-    for _token_str, (nuc, rel) in reduce_token_map.items():
-        return Reduce(nuc=nuc, rel=rel)
-    return None
+_CE_CHUNK_ROWS = 1024
 
 
-def repair_actions(strings: list[str], reduce_token_map) -> tuple[list[ShiftReduceAction], str | None]:
-    """Try `strings_to_actions` on the raw string list. If trailing source
-    tokens are present, append a closing `<shift>` and the right number of
-    fallback reduces to drain the stack. Returns the action list plus a reason
-    if the sequence had to be repaired, None if it parsed cleanly."""
-    try:
-        actions = strings_to_actions(strings, reduce_token_map)
-    except ValueError:
-        # Trailing source tokens: append a closing <shift>, then check
-        # stack-size against the resulting Shift count and add reduces below.
-        repaired = list(strings) + [Shift().to_token()]
-        try:
-            actions = strings_to_actions(repaired, reduce_token_map)
-        except ValueError as e:
-            return [], str(e)
-        n_shifts = sum(1 for a in actions if isinstance(a, Shift))
-        n_reduces = sum(1 for a in actions if isinstance(a, Reduce))
-        needed = (n_shifts - 1) - n_reduces
-        if needed < 0:
-            return actions, f"too many reduces ({n_reduces}) for {n_shifts} shifts"
-        if needed > 0:
-            fallback = fallback_reduce(reduce_token_map)
-            if fallback is None:
-                return actions, "no fallback reduce token available"
-            actions = list(actions) + [fallback] * needed
-        return actions, "max_length hit mid-EDU, appended closing shift/reduces"
-    n_shifts = sum(1 for a in actions if isinstance(a, Shift))
-    n_reduces = sum(1 for a in actions if isinstance(a, Reduce))
-    if n_shifts == 0:
-        return actions, "no shifts in generated sequence"
-    if n_reduces != n_shifts - 1:
-        needed = (n_shifts - 1) - n_reduces
-        if needed < 0:
-            return actions, f"too many reduces ({n_reduces}) for {n_shifts} shifts"
-        fallback = fallback_reduce(reduce_token_map)
-        if fallback is None:
-            return actions, "stack underdrained and no fallback reduce available"
-        return list(actions) + [fallback] * needed, "stack underdrained, appended closing reduces"
-    return actions, None
+class _ChunkedVocabCE(torch.autograd.Function):
+    """Full-vocab cross-entropy over `logits[idx]` computed in row-chunks, so the fp32
+    logits + log-softmax peak is `[chunk, V]` instead of `[len(idx), V]`. In words mode at
+    27-31B the 262k-vocab CE over a long stream otherwise materializes multi-GB fp32
+    tensors and OOMs (measured on gemma-4-31B sexp). Mathematically identical to
+    `F.cross_entropy(logits[idx].float(), labels[idx], reduction='mean', label_smoothing=s)`:
+    each chunk sums its loss, the total is divided by the row count, and the backward
+    recomputes each chunk's gradient (a compute-for-memory trade). Only the scored rows get
+    gradient; the rest of `logits.grad` stays zero (matching ignore_index)."""
+
+    @staticmethod
+    def forward(ctx, logits, labels, idx, label_smoothing, chunk):
+        ctx.save_for_backward(logits, labels, idx)
+        ctx.label_smoothing = float(label_smoothing)
+        ctx.chunk = int(chunk)
+        n = int(idx.numel())
+        total = torch.zeros((), device=logits.device, dtype=torch.float32)
+        for s in range(0, n, ctx.chunk):
+            rows = idx[s : s + ctx.chunk]
+            lg = logits.index_select(0, rows).float()
+            total = total + F.cross_entropy(
+                lg, labels.index_select(0, rows), label_smoothing=ctx.label_smoothing, reduction="sum"
+            )
+        return total / max(n, 1)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        logits, labels, idx = ctx.saved_tensors
+        n = int(idx.numel())
+        scale = grad_output.detach().to(torch.float32) / max(n, 1)
+        grad = torch.zeros_like(logits)
+        for s in range(0, n, ctx.chunk):
+            rows = idx[s : s + ctx.chunk]
+            lg = logits.index_select(0, rows).float().requires_grad_(True)
+            with torch.enable_grad():
+                loss = F.cross_entropy(
+                    lg, labels.index_select(0, rows), label_smoothing=ctx.label_smoothing, reduction="sum"
+                )
+            (g,) = torch.autograd.grad(loss, lg)
+            grad.index_copy_(0, rows, (g * scale).to(grad.dtype))
+        return grad, None, None, None, None
+
+
+def chunked_cross_entropy(logits, labels, idx, *, label_smoothing: float = 0.0, chunk: int = _CE_CHUNK_ROWS):
+    """Memory-bounded mean cross-entropy over the `idx` rows of `logits` (`[M, V]`) against
+    `labels` (`[M]`). See `_ChunkedVocabCE`. Empty `idx` returns 0 (no scored positions)."""
+    if idx.numel() == 0:
+        return logits.new_zeros((), dtype=torch.float32)
+    return _ChunkedVocabCE.apply(logits, labels, idx, label_smoothing, chunk)

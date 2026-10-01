@@ -18,50 +18,46 @@ import pytest
 
 pytest.importorskip("transformers")
 
+from iudex.rst.parsers.gen.configuration_gen import GenConfig
+from iudex.rst.parsers.gen.modeling_gen import GenParser
+
 T5 = os.environ.get("IUDEX_TEST_SEQ2SEQ_MODEL", "google-t5/t5-small")
 CAUSAL = os.environ.get("IUDEX_TEST_CAUSAL_MODEL", "hf-internal-testing/tiny-random-Gemma3ForCausalLM")
 
 
-def _build(parser_kind: str, model: str):
-    if parser_kind == "seq2seq_sr":
-        from iudex.rst.parsers.seq2seq_sr.configuration_seq2seq_sr import Seq2SeqSRConfig
-        from iudex.rst.parsers.seq2seq_sr.modeling_seq2seq_sr import Seq2SeqSRParser
-
-        cfg_cls, parser_cls = Seq2SeqSRConfig, Seq2SeqSRParser
-    else:
-        from iudex.rst.parsers.decoder_only_sr.configuration_decoder_only_sr import DecoderOnlySRConfig
-        from iudex.rst.parsers.decoder_only_sr.modeling_decoder_only_sr import DecoderOnlySRParser
-
-        cfg_cls, parser_cls = DecoderOnlySRConfig, DecoderOnlySRParser
-    cfg = cfg_cls.from_dict(
-        {
-            "train_dir": "<unused>",
-            "dev_dir": "<unused>",
-            "model_name": model,
-            "relation_types": [["elaboration", "rst"], ["joint", "multinuc"]],
-            "amp": False,
-            "max_input_length": 256,
-            "max_output_length": 512,
-            "num_beams": 1,
-        }
-    )
+def _build(backbone: str, model: str) -> GenParser:
+    d = {
+        "backbone": backbone,
+        "serialization": "sr",
+        "train_dir": "<unused>",
+        "dev_dir": "<unused>",
+        "model_name": model,
+        "relation_types": [["elaboration", "rst"], ["joint", "multinuc"]],
+        "amp": False,
+        "max_input_length": 256,
+        "max_output_length": 512,
+        "num_beams": 1,
+    }
     try:
-        return parser_cls(cfg)
+        return GenParser(GenConfig.from_dict(d))
     except Exception as e:  # network / gated / arch mismatch on this host
-        pytest.skip(f"Could not construct {parser_kind} with {model}: {e!r}")
+        pytest.skip(f"Could not construct gen {backbone}/sr with {model}: {e!r}")
 
 
-@pytest.mark.parametrize("parser_kind,model", [("seq2seq_sr", T5), ("decoder_only_sr", CAUSAL)])
-def test_deep_action_sequence_degrades_not_crashes(parser_kind, model):
-    parser = _build(parser_kind, model)
+@pytest.mark.parametrize("backbone,model", [("seq2seq", T5), ("decoder_only", CAUSAL)])
+def test_deep_action_sequence_degrades_not_crashes(backbone, model):
+    parser = _build(backbone, model)
+    ser = parser.serialization
     # ~1300 single-token EDUs then a linear reduce chain => ~1300-deep tree,
     # past CPython's default 1000-frame limit.
     src = parser.tokenizer("word " * 1300, add_special_tokens=False).input_ids[:1300]
     if len(src) < 1200:
         pytest.skip("tokenizer produced too few ids to force deep recursion")
+    # gen's SR build_tree consumes source subwords via <copy> sentinels (source_ids
+    # passed separately), so a single-token EDU is COPY + SHIFT per source position.
     action_ids: list[int] = []
-    for s in src:
-        action_ids += [s, parser.shift_token_id]
-    action_ids += [sorted(parser.reduce_token_ids)[0]] * (len(src) - 1)
-    tree = parser._tree_from_action_sequence(action_ids, src)  # must not raise RecursionError
+    for _s in src:
+        action_ids += [ser.copy_token_id, ser.shift_token_id]
+    action_ids += [sorted(ser.reduce_token_ids)[0]] * (len(src) - 1)
+    tree = ser.build_tree(action_ids, src)  # must not raise RecursionError
     assert len(tree.edus) >= 1

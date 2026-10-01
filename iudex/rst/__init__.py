@@ -21,13 +21,14 @@ GLOBAL_COMMANDS: dict[str, str] = {}
 HASH_EXCLUDE: tuple[str, ...] = DEFAULT_HASH_EXCLUDE + (
     "relation_types",
     "amp",
+    "empty_cache_between_docs",
+    "checkpoint_decoder",
     "num_beams",
-    "use_validity_constraints",
     "eval_decode_greedy",
     "min_edu_length",
     "dev_max_docs",
     "dev_batch_size",
-    "constrain_content",
+    "batched_decode",
 )
 
 __all__ = ["PARSERS", "PARSER_SCOPED_COMMANDS", "GLOBAL_COMMANDS", "HASH_EXCLUDE"]

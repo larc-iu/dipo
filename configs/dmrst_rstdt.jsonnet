@@ -54,6 +54,7 @@
     grad_accum: 3,
     amp: true,                                             // bf16 autocast (CUDA), inference stays fp32
     patience: 10,
+    patience_window: 1,                                    // 2026-08-10: unified protocol, raw-value stopping (window 1); reported runs used the default 5-epoch trailing mean
     max_grad_norm: 20.0,
     weight_decay: 0.01,
     num_warmup_steps: 100,                                 // null = 1-epoch warmup, 0 = none

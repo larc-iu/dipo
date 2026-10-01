@@ -1,4 +1,4 @@
-"""Validity constraints for s-expression seq2seq decoding.
+"""Validity constraints for s-expression decoding (`gen`'s `sexp` serialization).
 
 A pushdown automaton over decoder positions. Validity is enforced by
 restricting which action ids are legal at each step. The state is immutable
@@ -10,7 +10,6 @@ Grammar (per `RstTree.to_sexp` / `from_sexp`, plan style):
   tree   ::= '(' LABEL tree tree ')'        -- pre-order internal
            | '(' tree tree LABEL ')'        -- post-order internal
            | '(' CONTENT* ')'               -- leaf with literal source content
-           | '<edu>'                        -- leaf placeholder (use_copy mode)
 
   CONTENT ::= source token (verbatim from input)  -- when use_copy=False
             | <copy>                              -- when use_copy=True
@@ -22,8 +21,6 @@ Action vocabulary, as integer ids:
   eos_id: end-of-sequence
   use_copy=True:  copy_id (the single `<copy>` token; advances the cursor)
                   no source_ids passed (the decoder's leaf-text is just <copy>s)
-                  optionally edu_placeholder_id (the `<edu>` bare token, if the
-                  caller's vocabulary uses it for include_text=False trees)
   use_copy=False: source_ids = list of input subword ids, one per cursor
                   position. The legal source token at any cursor i is exactly
                   source_ids[i]. Any other token in the source vocabulary is
@@ -38,48 +35,17 @@ Constraints enforced:
   * Source-token / <copy> emit legal iff inside an EDU leaf AND cursor < source_len.
   * EOS legal iff depth == 0 AND cursor == source_len AND a tree has been emitted.
 
-The state intentionally does not depend on the model's hidden state or on
-which specific source token was emitted (in use_copy=False mode we still
-hard-mask to source_ids[cursor], but that's done by the caller using
-`expected_source_id()`). It is a pure function of the action-id prefix.
+The state intentionally does not depend on the model's hidden state. It is a
+pure function of the action-id prefix.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
-from typing import FrozenSet, List, Optional, Tuple, Union
+from dataclasses import dataclass, replace
+from typing import FrozenSet, List, Optional, Tuple
 
-
-class _ForceContent:
-    """Singleton sentinel for `GoldEduForcer.narrowed_legal`'s third return
-    case. See `FORCE_CONTENT`."""
-
-    _instance: Optional["_ForceContent"] = None
-
-    def __new__(cls) -> "_ForceContent":
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
-
-    def __repr__(self) -> str:
-        return "FORCE_CONTENT"
-
-
-# Third `narrowed_legal` return case (cc=False only). Tells the caller to
-# build a mask that admits ONLY the content wildcard (the full vocab minus
-# all structural ids), forcing the next emitted token to be EDU content. The
-# whitelist-intersection protocol can't express this because under the
-# content wildcard `state.legal_actions()` is empty (content is not an
-# enumerable id set), so a frozenset return would be the empty set and the
-# caller would mask everything to -inf. The caller handles FORCE_CONTENT by
-# constructing the same mask `state.content_is_wildcard()` would produce:
-# start all-True, then zero out `state.structural_ids()` (OPEN, CLOSE, all
-# label ids, EOS, copy, edu placeholder, and tokenizer specials). See the
-# module-level note on `narrowed_legal` for the full caller contract.
-FORCE_CONTENT = _ForceContent()
-
-# Type alias for `narrowed_legal`'s return.
-NarrowedLegal = Union[None, FrozenSet[int], _ForceContent]
+# `GoldEduForcer.narrowed_legal`'s return: None (no narrowing) or a whitelist.
+NarrowedLegal = Optional[FrozenSet[int]]
 
 
 # Per-span state pushed onto the stack each time '(' opens a span.
@@ -105,34 +71,28 @@ class SexpDecodingState:
     label_ids: FrozenSet[int]
     copy_id: Optional[int] = None  # required iff use_copy=True
     source_ids: Tuple[int, ...] = ()  # required iff use_copy=False; len == source_len
-    edu_placeholder_id: Optional[int] = None  # `<edu>` token, when serialized include_text=False
 
     # Minimum content-token count required before a leaf may close. Mirrors
-    # the same-name knob on the SR parsers. Inference-only (training uses
+    # the same-name knob on the encoder parsers. Inference-only (training uses
     # teacher-forced sequences). Exception: at end-of-source the leaf may
     # close even when below the threshold, since otherwise the final EDU
     # cannot commit.
     min_edu_length: int = 1
 
-    # When True (default) AND use_copy=False, content positions are masked
-    # to the single source id at `source_ids[cursor]` (COPY-via-constraint).
-    # When False AND use_copy=False, content positions admit any non-
-    # structural token id. This mirrors Hu and Wan 2023's apparent setup
-    # (free content generation, the model must learn to copy via attention).
-    # No-op when use_copy=True (the COPY token is the sole legal content
-    # action regardless).
-    constrain_content: bool = True
-
-    # Tokenizer special ids (PAD, BOS, UNK, decoder_start, ...) the caller
-    # wants treated as structural at content-wildcard positions. Only
-    # consumed by `structural_ids()`; the parsers populate this from
-    # `tokenizer.all_special_ids` at state construction so leaked specials
-    # don't end up in the EDU surface text under `constrain_content=False`.
-    tokenizer_special_ids: FrozenSet[int] = frozenset()
+    # Multi-token relation-word labels (label_style='words'). Empty in token
+    # mode, where a label is a single id in `label_ids`. Prefix-free by
+    # construction (`build_word_label_vocab`), so the label trie needs no
+    # terminators. When non-empty, `label_ids` is unused and labels are matched
+    # as token sequences through `label_cursor`.
+    word_label_ids: FrozenSet[Tuple[int, ...]] = frozenset()
 
     cursor: int = 0
     depth: int = 0
     stack: Tuple[_Frame, ...] = ()  # one frame per currently open span
+    # Tokens of the in-progress multi-token label emitted so far in the current
+    # label slot; () when not mid-label. Always a PROPER prefix of some label
+    # between steps (completion is applied immediately in `step`). Words mode only.
+    label_cursor: Tuple[int, ...] = ()
     root_emitted: bool = False  # set True after the root's matching ')' fires
     terminated: bool = False  # set True after EOS
 
@@ -155,21 +115,48 @@ class SexpDecodingState:
     def is_terminal(self) -> bool:
         return self.terminated
 
-    def expected_source_id(self) -> Optional[int]:
-        """In use_copy=False mode, the legal source-token id at the current
-        cursor (or None if no source token is legal right now)."""
-        if self.use_copy:
-            return None
-        if not self.in_edu_leaf or self.cursor >= self.source_len:
-            return None
-        return self.source_ids[self.cursor]
+    @property
+    def _is_words_labels(self) -> bool:
+        return bool(self.word_label_ids)
+
+    def _label_continuations(self, cursor: Tuple[int, ...]) -> FrozenSet[int]:
+        """Trie continuations of `cursor`: the token ids that legally extend the
+        in-progress multi-token label. Empty once `cursor` is a complete label
+        (prefix-free, so a complete label is never a proper prefix)."""
+        n = len(cursor)
+        return frozenset(seq[n] for seq in self.word_label_ids if len(seq) > n and seq[:n] == cursor)
+
+    def label_next_ids(self) -> FrozenSet[int]:
+        """Legal label token ids at the current position: in token mode the whole
+        single-id `label_ids`; in words mode the trie continuations of the
+        in-progress label (the labels' first tokens when not mid-label)."""
+        if self._is_words_labels:
+            return self._label_continuations(self.label_cursor)
+        return self.label_ids
+
+    def _apply_label_token(self, action_id: int) -> "SexpDecodingState":
+        """Consume one token of a multi-token relation-word label (words mode).
+        The first token commits a preorder frame to internal; the token that
+        completes the label sets `label_emitted`. `label_cursor` tracks progress
+        and resets to () on completion."""
+        new_cursor = self.label_cursor + (action_id,)
+        complete = new_cursor in self.word_label_ids
+        top = self.stack[-1]
+        if self.traversal_order == "preorder" and not self.label_cursor:
+            new_top = replace(top, kind="internal", children_emitted=0, label_emitted=complete)
+        else:
+            new_top = replace(top, label_emitted=complete)
+        return replace(
+            self,
+            stack=self.stack[:-1] + (new_top,),
+            label_cursor=() if complete else new_cursor,
+        )
 
     @property
     def remaining_content(self) -> int:
-        """Source/EDU-slot positions not yet consumed by the cursor. Every
-        leaf (or `<edu>` placeholder) that still has to START must consume at
-        least one of these, so this is the budget the obligation gates spend
-        against."""
+        """Source positions not yet consumed by the cursor. Every leaf that
+        still has to START must consume at least one of these, so this is the
+        budget the obligation gates spend against."""
         return self.source_len - self.cursor
 
     def _pending_leaf_obligation(self) -> int:
@@ -194,10 +181,10 @@ class SexpDecodingState:
         preorder frame is internal once its label fired).
 
         Maintaining the invariant `remaining_content >= _pending_leaf_obligation()`
-        at every in-tree state is what makes the OPEN/placeholder gates below
-        deadlock-free: it guarantees an internal node never reaches
-        `children_emitted == 1` with the source exhausted (which would be
-        unable to OPEN its 2nd child and unable to CLOSE).
+        at every in-tree state is what makes the OPEN gates below deadlock-free:
+        it guarantees an internal node never reaches `children_emitted == 1` with
+        the source exhausted (which would be unable to OPEN its 2nd child and
+        unable to CLOSE).
         """
         if not self.stack:
             return 0
@@ -243,32 +230,15 @@ class SexpDecodingState:
             need += 1  # this frame would go from a 1-leaf to a 2-leaf node
         return self.remaining_content >= need
 
-    def _placeholder_legal(self) -> bool:
-        """Whether the `<edu>` placeholder is legal as a child here.
-
-        The placeholder is a contentless leaf in include_text=False mode: per
-        `step`, it consumes exactly one cursor position (capped at source_len)
-        and resolves/extends the parent to an internal node with one more
-        child. `source_len` in this mode is the EDU count, so a position is the
-        per-EDU budget and the placeholder is a leaf-start: it needs >= 1
-        remaining position, and (because it commits the parent to one more
-        child) the same affordability as opening a subtree.
-
-        LIMITATION: placeholder mode is not exercised by any shipped config and
-        has no end-to-end coverage. This gate is the sound minimal bound
-        (never offer a placeholder with no remaining EDU slot, never commit to
-        an unaffordable extra child); the exact obligation arithmetic for the
-        None-frame -> internal(children=1) transition the placeholder triggers
-        in `step` is not separately validated here. If placeholder decoding is
-        ever turned on, add direct PDA tests before trusting it.
-        """
-        if self.remaining_content < 1:
-            return False
-        return self._can_open_subtree()
-
     def legal_actions(self) -> FrozenSet[int]:
         if self.terminated:
             return frozenset()
+
+        # Mid multi-token label (words mode): only the trie continuations of the
+        # in-progress label are legal until it completes. Labels never touch the
+        # content/leaf budgets, so this is the sole gating while mid-label.
+        if self.label_cursor:
+            return self.label_next_ids()
 
         legal: List[int] = []
 
@@ -277,17 +247,11 @@ class SexpDecodingState:
             legal.append(self.eos_id)
             return frozenset(legal)
 
-        # Pre-root: only '(' or '<edu>' can start the tree.
+        # Pre-root: only '(' can start the tree. OPEN requires there be at
+        # least one source position to fill the tree's (minimally one) leaf.
         if self.depth == 0 and not self.root_emitted:
-            # An '<edu>' top-level is allowed only for a 1-EDU document and
-            # only in use_copy=True+include_text=False mode. For simplicity in
-            # the constraint state we just gate on edu_placeholder_id being set.
-            # OPEN requires there be at least one source position to fill the
-            # tree's (minimally one) leaf.
             if self._can_open_subtree():
                 legal.append(self.open_id)
-            if self.edu_placeholder_id is not None and self.source_len > 0:
-                legal.append(self.edu_placeholder_id)
             return frozenset(legal)
 
         # Inside an open span. Look at the innermost frame.
@@ -305,9 +269,9 @@ class SexpDecodingState:
                 if self.cursor < self.source_len:
                     legal.extend(self._content_legal())
                 if self._can_open_subtree():
-                    legal.extend(sorted(self.label_ids))
+                    legal.extend(sorted(self.label_next_ids()))
             else:
-                # Postorder. Internal: child first, which is '(' or '<edu>'.
+                # Postorder. Internal: child first, which is '('.
                 # Leaf: starts with a source/copy token.
                 # OPEN here would commit this frame to being a 2-leaf internal
                 # node, so it is gated on being able to afford a 2nd leaf; the
@@ -315,10 +279,6 @@ class SexpDecodingState:
                 # node, so the legal set is never empty.
                 if self._can_open_subtree():
                     legal.append(self.open_id)
-                # `<edu>` placeholder: see the placeholder note in
-                # `_placeholder_legal`. Gated identically to OPEN.
-                if self.edu_placeholder_id is not None and self._placeholder_legal():
-                    legal.append(self.edu_placeholder_id)
                 if self.cursor < self.source_len:
                     legal.extend(self._content_legal())
             return frozenset(legal)
@@ -379,8 +339,6 @@ class SexpDecodingState:
             if top.children_emitted < 2:
                 if self._can_open_subtree():
                     legal.append(self.open_id)
-                if self.edu_placeholder_id is not None and self._placeholder_legal():
-                    legal.append(self.edu_placeholder_id)
             else:
                 if self._can_close():
                     legal.append(self.close_id)
@@ -389,81 +347,26 @@ class SexpDecodingState:
         if top.children_emitted < 2:
             if self._can_open_subtree():
                 legal.append(self.open_id)
-            if self.edu_placeholder_id is not None and self._placeholder_legal():
-                legal.append(self.edu_placeholder_id)
             return frozenset(legal)
         if not top.label_emitted:
-            legal.extend(sorted(self.label_ids))
+            legal.extend(sorted(self.label_next_ids()))
             return frozenset(legal)
         if self._can_close():
             legal.append(self.close_id)
         return frozenset(legal)
 
-    def content_is_wildcard(self) -> bool:
-        """True iff this is a content-emit position whose legal content is the
-        wildcard (any non-structural vocab id). See the `FORCE_CONTENT`
-        constant. Only possible under use_copy=False and constrain_content=False.
-
-        Must mirror `legal_actions`' content gating exactly: under cc=False
-        `_content_legal()` returns [] so the obligation gates there are
-        invisible in the returned legal set, and this predicate is the only
-        place the caller's mask learns whether content is admissible. In
-        particular the leaf budget gate (`remaining_content > obl_rest`)
-        applies here too; without it the wildcard mask let the model eat into
-        positions reserved for future leaf starts, breaking the
-        `remaining_content >= _pending_leaf_obligation()` invariant and
-        deadlocking the decode later (empty legal set).
-        """
-        if self.use_copy or self.constrain_content:
-            return False
-        if self.cursor >= self.source_len:
-            return False
-        if not self.stack:
-            return False
-        top = self.stack[-1]
-        if top.kind == "leaf":
-            # Same gate as the leaf branch of `legal_actions`: eating must not
-            # consume a position reserved for a distinct future leaf start.
-            return self.remaining_content > self._pending_leaf_obligation()
-        if top.kind is None:
-            # Fresh frame: content is one of the legal first actions (starting
-            # this frame as a leaf spends the frame's own 1-leaf obligation, so
-            # it is always affordable while content remains).
-            return True
-        return False
-
-    def structural_ids(self) -> FrozenSet[int]:
-        """All structural token ids (open, close, labels, eos, copy, edu
-        placeholder, plus tokenizer specials like PAD/BOS/UNK/decoder_start).
-        Callers use this to mask the wildcard content slot in
-        `constrain_content=False` mode so tokenizer specials don't leak into
-        EDU surface text."""
-        ids: set[int] = {self.open_id, self.close_id, self.eos_id}
-        ids.update(int(x) for x in self.label_ids)
-        if self.copy_id is not None:
-            ids.add(int(self.copy_id))
-        if self.edu_placeholder_id is not None:
-            ids.add(int(self.edu_placeholder_id))
-        ids.update(int(x) for x in self.tokenizer_special_ids)
-        return frozenset(ids)
-
     def _content_legal(self) -> List[int]:
         """Source-content tokens legal *right now*.
 
         use_copy=True: the single `<copy>` token.
-        use_copy=False, constrain_content=True (default): the one source
-            subword id at `source_ids[cursor]` (COPY-via-constraint).
-        use_copy=False, constrain_content=False: returns the empty list.
-            Content is wildcarded. The caller checks `content_is_wildcard()`
-            and admits the full vocab minus `structural_ids()`.
+        use_copy=False: the one source subword id at `source_ids[cursor]`
+            (COPY-via-constraint).
         """
         if self.cursor >= self.source_len:
             return []
         if self.use_copy:
             return [self.copy_id]  # type: ignore[list-item]
-        if self.constrain_content:
-            return [self.source_ids[self.cursor]]
-        return []
+        return [self.source_ids[self.cursor]]
 
     def _can_close(self) -> bool:
         """Whether closing the innermost span is legal right now (i.e. the
@@ -503,21 +406,13 @@ class SexpDecodingState:
                 raise ValueError("EOS emitted in non-terminal position.")
             return replace(self, terminated=True)
 
-        # Pre-root: opening the tree, or one-EDU placeholder root.
+        # Pre-root: opening the tree.
         if self.depth == 0 and not self.root_emitted:
             if action_id == self.open_id:
                 return replace(
                     self,
                     depth=1,
                     stack=(_Frame(),),
-                )
-            if self.edu_placeholder_id is not None and action_id == self.edu_placeholder_id:
-                # Whole tree is a single '<edu>'; valid only if there's
-                # nothing else expected. Advance the cursor by source_len.
-                return replace(
-                    self,
-                    cursor=self.source_len,
-                    root_emitted=True,
                 )
             raise ValueError(f"Action {action_id} illegal at the pre-root position.")
 
@@ -532,6 +427,14 @@ class SexpDecodingState:
             raise ValueError(f"Action {action_id} illegal at the post-root position.")
 
         top = self.stack[-1]
+
+        # Mid multi-token label (words mode): the only legal continuation is the
+        # next trie token. Handled before the structural branches so a label token
+        # that happens to equal open/close/copy can't be misread mid-label.
+        if self.label_cursor:
+            if action_id in self._label_continuations(self.label_cursor):
+                return self._apply_label_token(action_id)
+            raise ValueError("Illegal token inside a multi-token label.")
 
         # Action: '('
         if action_id == self.open_id:
@@ -549,27 +452,6 @@ class SexpDecodingState:
                 depth=self.depth + 1,
                 stack=self.stack[:-1] + (new_top, _Frame()),
             )
-
-        # Action: '<edu>' placeholder
-        if self.edu_placeholder_id is not None and action_id == self.edu_placeholder_id:
-            new_top = top
-            if top.kind == "internal":
-                pass
-            elif top.kind is None and self.traversal_order == "postorder":
-                new_top = replace(top, kind="internal", children_emitted=0)
-            else:
-                raise ValueError(f"'<edu>' illegal inside a {top.kind!r} span.")
-            # The placeholder consumes one EDU's worth of source. We don't
-            # know exact token boundaries from the constraint side, so we
-            # advance the cursor only if the caller is in a mode where every
-            # placeholder corresponds to one source token (rare). The safer
-            # contract: include_text=False decoding doesn't emit source
-            # tokens at all, so cursor advancement is None here. The
-            # `source_len` should be set to the number of EDU placeholders
-            # the model is expected to emit in that mode.
-            advanced_top = replace(new_top, children_emitted=new_top.children_emitted + 1)
-            new_stack = self.stack[:-1] + (advanced_top,)
-            return replace(self, stack=new_stack, cursor=min(self.cursor + 1, self.source_len))
 
         # Action: ')'
         if action_id == self.close_id:
@@ -592,33 +474,32 @@ class SexpDecodingState:
                 root_emitted=self.root_emitted or root_now,
             )
 
-        # Action: label
-        if action_id in self.label_ids:
+        # Action: label. Token mode: a single id in `label_ids`. Words mode: the
+        # FIRST token of a multi-token relation-word label (subsequent tokens are
+        # handled by the mid-label branch above). `label_next_ids()` unifies both.
+        if action_id in self.label_next_ids():
             if self.traversal_order == "preorder":
                 if top.kind is not None:
                     raise ValueError("Label emitted at a non-open slot in preorder.")
-                new_top = replace(top, kind="internal", label_emitted=True, children_emitted=0)
             else:
                 if top.kind != "internal" or top.children_emitted != 2 or top.label_emitted:
                     raise ValueError("Label emitted at an illegal slot in postorder.")
+            if self._is_words_labels:
+                return self._apply_label_token(action_id)
+            if self.traversal_order == "preorder":
+                new_top = replace(top, kind="internal", label_emitted=True, children_emitted=0)
+            else:
                 new_top = replace(top, label_emitted=True)
             return replace(self, stack=self.stack[:-1] + (new_top,))
 
-        # Action: content token (<copy>, source-id, or wildcard non-structural)
+        # Action: content token (<copy> or the source id at the cursor)
         is_content = False
         if self.use_copy:
             if action_id == self.copy_id:
                 is_content = True
         else:
             if self.cursor < self.source_len:
-                if self.constrain_content:
-                    is_content = action_id == self.source_ids[self.cursor]
-                else:
-                    # Anything not already in the structural ids consumed above
-                    # counts as content. Since we already early-returned on
-                    # open / close / label / placeholder / eos / copy, just
-                    # reaching here under constrain_content=False means content.
-                    is_content = True
+                is_content = action_id == self.source_ids[self.cursor]
         if is_content:
             if top.kind == "internal":
                 raise ValueError("Source content emitted inside an internal node slot.")
@@ -636,62 +517,48 @@ class SexpDecodingState:
         raise ValueError(f"Action {action_id} is not in the legal set.")
 
 
-def make_initial_state(
-    source_len: int,
-    traversal_order: str,
-    use_copy: bool,
-    *,
-    open_id: int,
-    close_id: int,
-    eos_id: int,
-    label_ids,
-    copy_id: Optional[int] = None,
-    source_ids: Optional[List[int]] = None,
-    edu_placeholder_id: Optional[int] = None,
-    min_edu_length: int = 1,
-    constrain_content: bool = True,
-    tokenizer_special_ids: Optional[FrozenSet[int]] = None,
-) -> SexpDecodingState:
-    return SexpDecodingState(
-        source_len=source_len,
-        traversal_order=traversal_order,
-        use_copy=use_copy,
-        open_id=open_id,
-        close_id=close_id,
-        eos_id=eos_id,
-        label_ids=frozenset(int(x) for x in label_ids),
-        copy_id=copy_id,
-        source_ids=tuple(source_ids or ()),
-        edu_placeholder_id=edu_placeholder_id,
-        min_edu_length=int(min_edu_length),
-        constrain_content=bool(constrain_content),
-        tokenizer_special_ids=frozenset(int(x) for x in (tokenizer_special_ids or frozenset())),
-    )
-
-
 class GoldEduForcer:
     """Drive a `SexpDecodingState` to emit exactly `n_edus_target` leaves
-    matching the gold ranges, regardless of how (un)trained the model is.
+    matching the gold ranges, regardless of how (un)trained the model is,
+    while leaving the TREE SHAPE to the model.
 
-    Strategy: a right-leaning binary spine. At every kind=None frame holding
-    k leaves in its subtree, force OPEN (internal) when k>=2 or force a
-    content emission (leaf) when k==1. Each internal node's left child is
-    the recursive subtree with k-1 leaves. Its right child is the kth leaf.
+    Strategy: budget-range planning. Each open frame carries an EDU-budget
+    range [lo, hi], the number of gold leaves its subtree may still hold,
+    kept on a stack parallel to `state.stack`:
 
-    Tree shape is fixed by this forcing strategy. Only the LABEL slot and
-    the `<copy>`-vs-source content token choice are left to the model (the
-    latter is moot under `use_copy=True` or `constrain_content=True`).
+      * the root gets the exact budget [n, n]
+      * an internal node's first child gets [1, hi - 1] (its future sibling
+        needs at least one leaf)
+      * once the first child closes having consumed k leaves, the second
+        child gets [max(1, lo - k), hi - k] (exact whenever the parent was
+        exact, which is how the total resolves to exactly n at the root)
+
+    At a fresh (kind=None) frame the range decides what to force:
+
+      * lo >= 2: the subtree must be internal. Force the internal-node
+        starter (OPEN in postorder, the label slot in preorder).
+      * hi == 1: the subtree must be a single leaf. Force content to start it.
+      * lo == 1 and hi >= 2: DEFER to the model. Both leaf and internal are
+        consistent with gold segmentation, and this choice is exactly the
+        structural signal a gold-EDU Parseval should measure. (A forcer that
+        never defers here fixes the shape and reduces `gold_edu_*` to a
+        labeling metric, the pre-2026-07 behavior.)
+
+    Inside a leaf, content is forced until the cursor reaches the current
+    gold range's end, then CLOSE. So segmentation is gold by construction,
+    every bracketing decision is the model's, and label slots stay the
+    model's choice (narrowed to `label_ids`).
 
     Usage:
         forcer = GoldEduForcer(n_edus_target, gold_ranges)
         for step in ...:
-            forced = forcer.next_forced(state)
-            ... use forced if not None, else model.argmax ...
+            narrowed = forcer.narrowed_legal(state)
+            ... mask logits to (legal & narrowed) if not None, argmax ...
             new_state = state.step(chosen_id)
             forcer.observe(state, new_state, chosen_id)
             state = new_state
 
-    Assumes the driven state has `min_edu_length == 1` (both consumers pin it
+    Assumes the driven state has `min_edu_length == 1` (the consumer pins it
     for the forced state). With `min_edu_length > 1` an earlier leaf can
     overshoot and exhaust the source before a later leaf can start, deadlocking
     the forcer into an OPEN-spin to max length; honoring min_edu>1 here would
@@ -728,45 +595,52 @@ class GoldEduForcer:
         self.n_edus_target = len(sanitized)
         self.gold_ranges = sanitized
         self.closed_leaves = 0
-        # subtree_sizes[i] = number of leaves the i-th open frame's subtree
-        # should hold. Maintained parallel to `state.stack`.
-        self._subtree_sizes: List[int] = []
+        # _budgets[i] = [lo, hi, child_consumed] for the i-th open frame:
+        # the range of gold leaves its subtree may hold, plus how many leaves
+        # its already-closed children consumed. Maintained parallel to
+        # `state.stack` by `observe`.
+        self._budgets: List[List[int]] = []
 
-    @property
-    def opened_leaves(self) -> int:
-        return self.closed_leaves
+    def clone(self) -> "GoldEduForcer":
+        """Deep-enough copy for beam expansion: each beam drives its own forcer
+        and `observe` mutates `closed_leaves` + `_budgets`, so sibling beams
+        expanded from one parent must not share a forcer. The driven
+        `SexpDecodingState` is immutable and needs no clone (see
+        `SexpDecodeState.clone` in `serializations/sexp.py`). `gold_ranges` is a
+        tuple list never mutated after `__init__`, so it is shared, not copied.
+        `__new__` skips re-running `__init__` (which would re-sanitize the
+        ranges and reset the progress counters)."""
+        new = GoldEduForcer.__new__(GoldEduForcer)
+        new.n_edus_target = self.n_edus_target
+        new.gold_ranges = self.gold_ranges
+        new.closed_leaves = self.closed_leaves
+        new._budgets = [list(b) for b in self._budgets]
+        return new
 
     def _current_target_end(self) -> Optional[int]:
         if self.closed_leaves >= self.n_edus_target:
             return None
         return self.gold_ranges[self.closed_leaves][1]
 
-    def next_forced(self, state: SexpDecodingState) -> Optional[int]:
-        """Single-action force, or None to defer to `narrowed_legal()`.
-
-        FORCE_CONTENT is NOT a single action (it forces "some content token",
-        not one specific id), so it is treated like a non-singleton narrowing
-        here and returns None. The caller must consult `narrowed_legal`
-        directly to see FORCE_CONTENT, not rely on `next_forced`."""
-        narrowed = self.narrowed_legal(state)
-        if narrowed is None or narrowed is FORCE_CONTENT or len(narrowed) != 1:
-            return None
-        return next(iter(narrowed))
-
     def narrowed_legal(self, state: SexpDecodingState) -> NarrowedLegal:
         """Narrowing of `state.legal_actions()` consistent with the gold-EDU
-        plan. One of three return shapes:
+        plan. Two return shapes:
 
           * None -> no narrowing (use the model's argmax over the full legal
-            set, or over a multi-element whitelist on a later call).
+            set).
           * frozenset[int] of full-vocab ids -> whitelist. The caller masks
             logits to (legal & this set) and argmaxes. A singleton is a hard
             force. (In practice this is never the empty set.)
-          * FORCE_CONTENT (cc=False only) -> force a content-wildcard emit.
-            See the `FORCE_CONTENT` constant for the caller contract.
         """
         if state.is_terminal():
             return None
+
+        # Mid multi-token label (words mode): the legal set is already the label
+        # trie's continuations. Let the model pick the relation freely; label
+        # internals don't touch segmentation or tree shape.
+        if state.label_cursor:
+            return None
+
         legal = state.legal_actions()
 
         # Inside an active leaf: force content or CLOSE.
@@ -777,22 +651,10 @@ class GoldEduForcer:
             if state.cursor < target_end:
                 if state.use_copy:
                     return frozenset({state.copy_id}) if state.copy_id in legal else None
-                if state.constrain_content:
-                    if state.cursor >= state.source_len:
-                        return None
-                    content_id = state.source_ids[state.cursor]
-                    return frozenset({content_id}) if content_id in legal else None
-                # Free content (cc=False): force a content token via the
-                # wildcard. We can't return `frozenset(legal - {close})` (it's
-                # empty under the wildcard -> masks everything to -inf), and we
-                # can't return None (the model might argmax CLOSE before the
-                # gold target_end, since `legal` admits close once
-                # leaf_token_count >= min_edu_length). When the source is
-                # already exhausted there is no content to emit, so defer and
-                # let CLOSE happen.
                 if state.cursor >= state.source_len:
                     return None
-                return FORCE_CONTENT
+                content_id = state.source_ids[state.cursor]
+                return frozenset({content_id}) if content_id in legal else None
             return frozenset({state.close_id}) if state.close_id in legal else None
 
         # Pre-root: force OPEN.
@@ -808,71 +670,94 @@ class GoldEduForcer:
             return None
 
         top = state.stack[-1]
-        top_target = self._subtree_sizes[-1] if self._subtree_sizes else self.n_edus_target
+        lo, hi = (
+            (self._budgets[-1][0], self._budgets[-1][1])
+            if self._budgets
+            else (self.n_edus_target, self.n_edus_target)
+        )
 
         if top.kind == "internal":
             if top.children_emitted < 2:
                 return frozenset({state.open_id}) if state.open_id in legal else None
             if state.traversal_order == "postorder" and not top.label_emitted:
-                # Let the model pick the label, but constrain to label_ids.
-                return frozenset(state.label_ids) & legal
+                # Let the model pick the label, constrained to legal label tokens
+                # (single ids in token mode, label first-tokens in words mode).
+                return frozenset(state.label_next_ids()) & legal
             return frozenset({state.close_id}) if state.close_id in legal else None
 
-        # top.kind is None: fresh frame. Decide leaf vs internal by target.
-        if top_target <= 1:
-            # Force first content token. At a fresh frame `legal_actions()`
-            # also offers structural starters (labels / OPEN), so deferring to
-            # the model here (the old cc=False behavior) lets it turn the
-            # intended leaf into an internal node that never closes. We must
-            # force content to start the leaf.
+        # top.kind is None: fresh frame. The budget range decides.
+        if hi <= 1:
+            # Must be a leaf. Force the first content token: at a fresh frame
+            # `legal_actions()` also offers structural starters (labels /
+            # OPEN), so deferring here lets the model turn the intended leaf
+            # into an internal node that can never fit its budget.
             if state.use_copy:
                 return frozenset({state.copy_id}) if state.copy_id in legal else None
             if state.cursor >= state.source_len:
                 # No source left to start a leaf with. Defer (should not arise
                 # for a valid, M6-sanitized gold range).
                 return None
-            if state.constrain_content:
-                content_id = state.source_ids[state.cursor]
-                return frozenset({content_id}) if content_id in legal else None
-            # cc=False: force the content wildcard to begin the leaf.
-            return FORCE_CONTENT
-        # top_target >= 2: this frame is internal.
-        if state.traversal_order == "preorder":
-            # In preorder the first action inside an internal node is the LABEL.
-            return frozenset(state.label_ids) & legal
-        # Postorder: first action inside an internal is OPEN of its first child.
-        return frozenset({state.open_id}) if state.open_id in legal else None
+            content_id = state.source_ids[state.cursor]
+            return frozenset({content_id}) if content_id in legal else None
+        if lo >= 2:
+            # Must be internal.
+            if state.traversal_order == "preorder":
+                # In preorder the first action inside an internal node is the LABEL
+                # (its first token in words mode).
+                return frozenset(state.label_next_ids()) & legal
+            # Postorder: first action inside an internal is OPEN of its first child.
+            return frozenset({state.open_id}) if state.open_id in legal else None
+        # lo == 1 and hi >= 2: leaf vs internal is the model's structural
+        # choice. Defer.
+        return None
 
     def observe(self, before: SexpDecodingState, after: SexpDecodingState, action_id: int) -> None:
-        """Update the parallel subtree-size stack to mirror `after.stack`."""
+        """Update the parallel budget stack to mirror `after.stack`."""
         before_top = before.stack[-1] if before.stack else None
         # Leaf close detection.
         if action_id == before.close_id and before_top is not None and before_top.kind == "leaf":
             self.closed_leaves += 1
 
-        # Sync the subtree-size stack length with the new stack.
         before_depth = len(before.stack)
         after_depth = len(after.stack)
         if after_depth > before_depth:
-            # A new frame was pushed. Its target = parent_remaining - (right-leaf slot if applicable).
-            # Right-spine: when a frame's subtree_size is k>=2, its first child
-            # gets k-1 and its second child gets 1.
-            parent_target = self._subtree_sizes[-1] if self._subtree_sizes else self.n_edus_target
-            parent_top_before = before.stack[-1] if before.stack else None
-            # Determine which child slot was just opened.
-            if parent_top_before is None or parent_top_before.kind is None:
-                # First-ever frame (pre-root) OR fresh-frame-just-became-internal-via-OPEN.
-                # In the pre-root case the new frame inherits n_edus_target.
-                child_size = parent_target if not self._subtree_sizes else (parent_target - 1)
+            # OPEN pushed a frame.
+            if not self._budgets:
+                # Pre-root OPEN: the root must hold exactly n leaves.
+                self._budgets.append([self.n_edus_target, self.n_edus_target, 0])
+                return
+            parent = self._budgets[-1]
+            lo_p, hi_p, used_p = parent
+            if before_top is not None and before_top.kind == "internal" and before_top.children_emitted == 1:
+                # Second child: the first child's consumption resolves the range.
+                lo_c = max(1, lo_p - used_p)
+                hi_c = hi_p - used_p
             else:
-                # parent_top_before.kind == "internal" with some children_emitted count.
-                children_emitted_before = parent_top_before.children_emitted
-                if children_emitted_before == 0:
-                    child_size = parent_target - 1  # left child gets k-1 leaves
-                else:
-                    child_size = 1  # right child gets 1 leaf
-            self._subtree_sizes.append(max(1, int(child_size)))
+                # First child (the parent was a fresh frame this OPEN committed
+                # to internal, or an internal with no children yet). The parent
+                # now holds >= 2 leaves; the child leaves >= 1 for its sibling.
+                parent[0] = max(lo_p, 2)
+                lo_c = 1
+                hi_c = hi_p - 1
+            self._budgets.append([max(1, lo_c), max(1, hi_c), 0])
         elif after_depth < before_depth:
-            # A frame was popped (close).
-            if self._subtree_sizes:
-                self._subtree_sizes.pop()
+            # CLOSE popped a frame. Propagate its consumed leaf count.
+            closed = self._budgets.pop() if self._budgets else None
+            if self._budgets and closed is not None:
+                is_leaf = before_top is not None and before_top.kind == "leaf"
+                self._budgets[-1][2] += 1 if is_leaf else closed[2]
+        else:
+            # Same depth: a preorder label commits a fresh frame to internal.
+            # Detect the kind transition directly (None -> internal) so it works
+            # for both single-id labels and the first token of a words-mode
+            # multi-token label (`action_id in before.label_ids` would miss the
+            # latter, since words mode leaves `label_ids` empty).
+            after_top = after.stack[-1] if after.stack else None
+            if (
+                self._budgets
+                and before_top is not None
+                and before_top.kind is None
+                and after_top is not None
+                and after_top.kind == "internal"
+            ):
+                self._budgets[-1][0] = max(self._budgets[-1][0], 2)

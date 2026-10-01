@@ -18,7 +18,7 @@ from rich.pretty import Pretty
 from rich.table import Table
 
 import iudex
-from iudex.common.log import console, dim, success
+from iudex.common.log import console, dim, success, wrote
 
 # Last 12 hex chars of the run dir name are the config hash. Everything
 # before is the optional run_name.
@@ -49,15 +49,13 @@ def _all_parsers() -> dict:
 def _infer_parser_kind(config: dict, parsers: dict) -> str:
     """Find the parser whose signature_field is present in `config`.
 
-    Multiple parsers' signature_fields can both legitimately appear in one
-    config (e.g. `decoder_only_sr` carries `num_beams`, which is also
-    `seq2seq_sr`'s signature). When that happens, first try to pick the
-    parser whose signature_field doesn't appear on any OTHER parser's
-    config dataclass (truly distinguishing field). If that's still
-    ambiguous (the case with the four parsers in the seq2seq / decoder_only
-    cluster, none of whose fields are fully unique), fall back to picking
-    the parser whose default field set most closely matches the config's
-    keys (minimum symmetric difference). Returns "?" on no match."""
+    Two parsers' signature_fields can both appear in one config (a superset config
+    carries a sibling's field too). When that happens, first pick the parser whose
+    signature_field appears on no OTHER parser's config dataclass (a truly
+    distinguishing field). If still ambiguous, fall back to the parser whose default
+    field set most closely matches the config's keys (minimum symmetric difference).
+    Returns "?" on no match. (The generative parser `gen` has a unique `backbone`
+    signature, so it resolves in the single-match fast path.)"""
     import dataclasses as _dc
 
     matches = [(name, spec) for name, spec in parsers.items() if spec.signature_field in config]
@@ -85,11 +83,9 @@ def _infer_parser_kind(config: dict, parsers: dict) -> str:
         return distinguishing[0]
 
     # Tie-break: parser whose default field set most closely matches the
-    # config's keys (smallest symmetric difference). When two parsers
-    # differ only by an added field (e.g. seq2seq_sexp adds traversal_order
-    # on top of seq2seq_sr), the config carrying that added field will
-    # match the sexp parser's dataclass exactly while leaving the sr parser
-    # one short.
+    # config's keys (smallest symmetric difference). When two parsers differ
+    # only by an added field, the config carrying that field matches the
+    # superset parser's dataclass exactly while leaving the other one short.
     config_keys = set(config.keys())
     candidates = distinguishing if distinguishing else [name for name, _ in matches]
     scored = [(len(fields_by_name.get(name, set()) ^ config_keys), name) for name in candidates]
@@ -469,6 +465,219 @@ def delete_all_runs(checkpoint_dir: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Archiving and disk reclaim
+
+# Subdirs worth keeping when a run is archived: the prediction dumps (e2e,
+# gold-EDU), any `archive_*` decode-pass snapshots (the beam-6 headline lives
+# here once a greedy pass overwrites the top-level final_metrics.json), and
+# side-script re-eval outputs. `tb/` and `*.pt` are never archived.
+def _is_archivable_subdir(name: str) -> bool:
+    n = name.lower()
+    return "prediction" in n or n.startswith("archive") or n.endswith("_reval") or n.startswith("gold_edu")
+
+
+def _sha256(path: str) -> str:
+    import hashlib
+
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 16), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _copy_run_for_archive(run_dir: str, dest: str) -> dict[str, str]:
+    """Copy a run's durable subset (every root `*.json`, plus prediction /
+    archive / reval subdirs, minus `*.pt` and `tb/`) into `dest`. Returns a
+    {relpath: sha256} manifest of the copied files for verification."""
+    os.makedirs(dest, exist_ok=True)
+    manifest: dict[str, str] = {}
+    for entry in sorted(os.listdir(run_dir)):
+        src = os.path.join(run_dir, entry)
+        if os.path.isfile(src) and entry.endswith(".json"):
+            shutil.copy2(src, os.path.join(dest, entry))
+            manifest[entry] = _sha256(src)
+        elif os.path.isdir(src) and _is_archivable_subdir(entry):
+            dst = os.path.join(dest, entry)
+            shutil.copytree(src, dst, ignore=shutil.ignore_patterns("*.pt"))
+            for root, _dirs, files in os.walk(dst):
+                for fn in files:
+                    p = os.path.join(root, fn)
+                    manifest[os.path.relpath(p, dest)] = _sha256(p)
+    return manifest
+
+
+def _verify_archived(dest: str) -> None:
+    """Re-parse every archived JSON so a corrupt copy is caught before the
+    source .pt is reclaimed. Raises on failure."""
+    for root, _dirs, files in os.walk(dest):
+        for fn in files:
+            if fn.endswith(".json"):
+                with open(os.path.join(root, fn), encoding="utf-8") as f:
+                    json.load(f)
+
+
+def _archive_index_row(archive_run_dir: str, run_id: str, kind: str) -> dict:
+    def load(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    cfg = load(os.path.join(archive_run_dir, "config.json"))
+    side = load(os.path.join(archive_run_dir, "best_model.json")) or load(os.path.join(archive_run_dir, "last.json"))
+
+    # Headline = the highest-beam final_metrics among the top-level file and any
+    # archive_*/ decode snapshot. The two-pass eval protocol (beam-6 headline,
+    # then a greedy robustness pass) overwrites the top-level final_metrics.json
+    # with greedy, stashing beam-6 in archive_beam6/, so the top-level file
+    # alone would under-report the headline for those runs.
+    candidates = []
+    top = os.path.join(archive_run_dir, "final_metrics.json")
+    if os.path.exists(top):
+        candidates.append(load(top))
+    for entry in os.listdir(archive_run_dir):
+        snap = os.path.join(archive_run_dir, entry, "final_metrics.json")
+        if entry.startswith("archive") and os.path.exists(snap):
+            candidates.append(load(snap))
+    fm = max(candidates, key=lambda c: (c.get("decode") or {}).get("num_beams", 0), default={})
+    td = str(cfg.get("train_dir", "")).lower()
+    corpus = "gum" if "gum" in td else "rstdt" if "rstdt" in td else "?"
+
+    def m(split, key):
+        try:
+            return f"{fm[split][key]:.4f}"
+        except Exception:
+            return ""
+
+    peft = cfg.get("peft") or {}
+    curr = cfg.get("curriculum") or {}
+    n_rs4 = 0
+    for root, _dirs, files in os.walk(archive_run_dir):
+        n_rs4 += sum(1 for x in files if x.endswith(".rs4"))
+    return {
+        "run_id": run_id, "parser_kind": kind, "corpus": corpus,
+        "model_name": str(cfg.get("model_name", "")), "seed": str(cfg.get("seed", "")),
+        "beams": str((fm.get("decode") or {}).get("num_beams", "")),
+        "dev_e2e_full": m("dev", "e2e_full_f1"), "dev_gold_full": m("dev", "gold_edu_full_f1"),
+        "test_e2e_full": m("test", "e2e_full_f1"), "test_gold_full": m("test", "gold_edu_full_f1"),
+        "test_seg": m("test", "seg_f1"), "has_final": "Y" if fm else "-",
+        "best_val": str(side.get("best_val", "")), "epoch": str(side.get("epoch", "")),
+        "curriculum": str(curr.get("type", "simple") if curr else ""),
+        "peft_r": str(peft.get("r", "")) if peft else "full",
+        "train_dir": str(cfg.get("train_dir", "")), "n_rs4": str(n_rs4),
+    }
+
+
+_INDEX_COLS = ["run_id", "parser_kind", "corpus", "model_name", "seed", "beams",
+               "dev_e2e_full", "dev_gold_full", "test_e2e_full", "test_gold_full",
+               "test_seg", "has_final", "best_val", "epoch", "curriculum", "peft_r",
+               "train_dir", "n_rs4"]
+
+
+def _rebuild_archive_index(archive_dir: str) -> None:
+    """Rewrite `<archive_dir>/INDEX.tsv` from scratch by walking the archive
+    (one row per <parser_kind>/<run_id>). The per-run JSON is authoritative,
+    the index a lossy denormalized view, so a full rebuild can never drift."""
+    rows = []
+    for kind in sorted(os.listdir(archive_dir)):
+        kd = os.path.join(archive_dir, kind)
+        if not os.path.isdir(kd):
+            continue
+        for run_id in sorted(os.listdir(kd)):
+            rd = os.path.join(kd, run_id)
+            if os.path.isdir(rd) and os.path.exists(os.path.join(rd, "config.json")):
+                rows.append(_archive_index_row(rd, run_id, kind))
+    path = os.path.join(archive_dir, "INDEX.tsv")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\t".join(_INDEX_COLS) + "\n")
+        for r in rows:
+            f.write("\t".join(r[c] for c in _INDEX_COLS) + "\n")
+    wrote(path)
+
+
+def archive_runs(checkpoint_dir, archive_dir, run_ids, run_name, do_all, delete_pt, harvested_at):
+    """Harvest finished runs' durable subset into a plain-dir archive at
+    `<archive_dir>/<parser_kind>/<run_id>/`. Targeted by default: pass run ids,
+    `--run-name` prefix, or `--all` (a bare invocation refuses to sweep).
+
+    Only runs with a `final_metrics.json` are harvested (it is written last, so
+    its presence is the completion sentinel: predictions are complete and the
+    source is quiescent). Each run stages into `<run_id>.tmp` then atomically
+    swaps in, is verified (every JSON re-parses), and gets a `_harvest.json`
+    manifest. `--delete-pt` then removes the source `*.pt` (and `tb/`) once the
+    copy verifies, reclaiming disk while the numbers/predictions live on."""
+    if not (run_ids or run_name or do_all):
+        console.print("[bold red]Refusing to archive without a target.[/bold red] Pass run ids, --run-name PREFIX, or --all.")
+        sys.exit(2)
+
+    all_dirs = _list_run_dirs(checkpoint_dir)
+    if run_ids:
+        selected = [_resolve_run_id(checkpoint_dir, r) for r in run_ids]
+    elif run_name:
+        selected = [d for d in all_dirs if d.startswith(run_name)]
+    else:
+        selected = all_dirs
+    if not selected:
+        console.print("[yellow]No matching runs.[/yellow]")
+        return
+
+    os.makedirs(archive_dir, exist_ok=True)
+    parsers = _all_parsers()
+    n_ok = n_skip = 0
+    for run_id in selected:
+        run_dir = os.path.join(checkpoint_dir, run_id)
+        if not os.path.exists(os.path.join(run_dir, "final_metrics.json")):
+            dim(f"  skip {run_id}: no final_metrics.json (not finished)")
+            n_skip += 1
+            continue
+        try:
+            with open(os.path.join(run_dir, "config.json"), encoding="utf-8") as f:
+                cfg = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            dim(f"  skip {run_id}: unreadable config.json")
+            n_skip += 1
+            continue
+        kind = _read_parser_kind(run_dir) or _infer_parser_kind(cfg, parsers)
+
+        dest_parent = os.path.join(archive_dir, kind)
+        os.makedirs(dest_parent, exist_ok=True)
+        final_dest = os.path.join(dest_parent, run_id)
+        tmp_dest = final_dest + ".tmp"
+        if os.path.exists(tmp_dest):
+            shutil.rmtree(tmp_dest)
+
+        manifest = _copy_run_for_archive(run_dir, tmp_dest)
+        _verify_archived(tmp_dest)
+        with open(os.path.join(tmp_dest, "_harvest.json"), "w", encoding="utf-8") as f:
+            json.dump({"source_path": os.path.abspath(run_dir), "harvested_at": harvested_at,
+                       "files": manifest}, f, indent=2)
+        if os.path.exists(final_dest):
+            shutil.rmtree(final_dest)
+        os.replace(tmp_dest, final_dest)
+        success(f"  archived {kind}/{run_id} ({len(manifest)} files)")
+        n_ok += 1
+
+        if delete_pt:
+            reclaimed = 0
+            for entry in os.listdir(run_dir):
+                p = os.path.join(run_dir, entry)
+                if os.path.isfile(p) and entry.endswith(".pt"):
+                    reclaimed += os.path.getsize(p)
+                    os.remove(p)
+                elif os.path.isdir(p) and entry == "tb":
+                    for r, _d, fs in os.walk(p):
+                        reclaimed += sum(os.path.getsize(os.path.join(r, x)) for x in fs)
+                    shutil.rmtree(p)
+            if reclaimed:
+                dim(f"    reclaimed {reclaimed / 1024**3:.1f}GB of .pt/tb from source")
+
+    _rebuild_archive_index(archive_dir)
+    success(f"Archived {n_ok} run(s) to {archive_dir}" + (f", skipped {n_skip}" if n_skip else "") + ".")
+
+
+# ---------------------------------------------------------------------------
 # CLI wiring
 
 
@@ -501,6 +710,16 @@ def main():
         "delete-all", parents=[common], help="Delete every run in the checkpoint dir (requires typing 'delete all')"
     )
 
+    p_arch = sub.add_parser(
+        "archive", parents=[common],
+        help="Harvest finished runs' config+metrics+predictions into a backed-up archive (targeted by default)",
+    )
+    p_arch.add_argument("run_ids", nargs="*", help="Run ids (or unique prefixes) to archive")
+    p_arch.add_argument("--archive-dir", required=True, help="Destination archive root (plain dir, <parser_kind>/<run_id>/)")
+    p_arch.add_argument("--run-name", help="Archive every run whose dir name starts with this prefix")
+    p_arch.add_argument("--all", action="store_true", help="Archive every finished run (explicit opt-in to a full sweep)")
+    p_arch.add_argument("--delete-pt", action="store_true", help="After a verified copy, delete the source .pt/tb to reclaim disk")
+
     args = parser.parse_args()
 
     if args.subcommand == "list":
@@ -515,6 +734,11 @@ def main():
         delete_run(args.checkpoint_dir, args.run_id, args.yes)
     elif args.subcommand == "delete-all":
         delete_all_runs(args.checkpoint_dir)
+    elif args.subcommand == "archive":
+        archive_runs(
+            args.checkpoint_dir, args.archive_dir, args.run_ids, args.run_name,
+            args.all, args.delete_pt, datetime.now().isoformat(timespec="seconds"),
+        )
 
 
 if __name__ == "__main__":

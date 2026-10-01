@@ -296,9 +296,13 @@ class RstTree:
         sequence = []
         queue = [self.root.id]
 
-        def handle_satellite(sequence, edge, edu_yield):
+        def handle_satellite(sequence, edge, nucleus_yield):
             satellite_edu_yield = edu_yields[edge.target]
-            satellite_is_left = all(x < max(edu_yield) for x in satellite_edu_yield)
+            # Left iff entirely left of the NUCLEUS. Classifying against the
+            # whole node yield would misread the inner of two same-side right
+            # satellites as left (its EDUs all sit below the outer satellite's
+            # max even though they are right of the nucleus).
+            satellite_is_left = satellite_edu_yield[-1] < nucleus_yield[0]
             sequence.append(
                 (
                     satellite_edu_yield[-1] + 1 if satellite_is_left else satellite_edu_yield[0],
@@ -306,6 +310,17 @@ class RstTree:
                     self._resolve_rel(edge.relation),
                 )
             )
+
+        def outermost_first(satellite_edges, nucleus_yield):
+            def dist_to_nucleus(edge):
+                y = edu_yields[edge.target]
+                if y[-1] < nucleus_yield[0]:
+                    return nucleus_yield[0] - y[-1]
+                if y[0] > nucleus_yield[-1]:
+                    return y[0] - nucleus_yield[-1]
+                return 0
+
+            return sorted(satellite_edges, key=dist_to_nucleus, reverse=True)
 
         while len(queue) > 0:
             current = self._node_map[queue.pop(-1 if dfs else 0)]
@@ -322,33 +337,28 @@ class RstTree:
                 # per action, outermost-first, so the `spans()` `bounds` accumulator
                 # narrows each successive emit's enclosing range and the model sees
                 # a distinct gold split for each.
+                nucleus_edge = next(e for e in current_edges if e.relation == "span")
+                nucleus_yield = edu_yields[nucleus_edge.target]
                 satellite_edges = [e for e in current_edges if e.relation != "span"]
-                if len(satellite_edges) > 1:
-                    nucleus_edge = next(e for e in current_edges if e.relation == "span")
-                    nucleus_yield = edu_yields[nucleus_edge.target]
-
-                    def dist_to_nucleus(edge):
-                        y = edu_yields[edge.target]
-                        if y[-1] < nucleus_yield[0]:
-                            return nucleus_yield[0] - y[-1]
-                        if y[0] > nucleus_yield[-1]:
-                            return y[0] - nucleus_yield[-1]
-                        return 0
-
-                    satellite_edges = sorted(satellite_edges, key=dist_to_nucleus, reverse=True)
-                for edge in satellite_edges:
-                    handle_satellite(sequence, edge, edu_yield)
+                for edge in outermost_first(satellite_edges, nucleus_yield):
+                    handle_satellite(sequence, edge, nucleus_yield)
             elif current.type == "terminal":
                 if len(current_edges) == 0:
                     continue
-                edge = current_edges[0]
-                handle_satellite(sequence, edge, edu_yield)
+                # A terminal EDU can be the nucleus of several satellites at
+                # once (legal rs3, absent from shipped corpora). Same
+                # outermost-first emission as the span branch. The nucleus
+                # yield is the EDU itself.
+                nucleus_yield = [self._edus.index(current)]
+                for edge in outermost_first(current_edges, nucleus_yield):
+                    handle_satellite(sequence, edge, nucleus_yield)
             else:
                 satellite_relation = None
                 if len(current_edges) == 3:
                     satellite_relation = Counter([e.relation for e in current_edges]).most_common(2)[1][0]
                     edge = [e for e in current_edges if e.relation == satellite_relation][0]
-                    handle_satellite(sequence, edge, edu_yield)
+                    satellite_set = set(edu_yields[edge.target])
+                    handle_satellite(sequence, edge, [x for x in edu_yield if x not in satellite_set])
                 multinuc_edges = [e for e in current_edges if e.relation != satellite_relation]
                 edge_yields = [edu_yields[e.target] for e in multinuc_edges]
                 first_is_left = all(edge_yields[0][0] < x for x in edge_yields[1])
@@ -388,13 +398,18 @@ class RstTree:
         """Return a new tree with binary multinuclear chains flattened to n-ary.
 
         A multinuc node nested directly under another multinuc, where the
-        attaching edge and all of the child's own edges share one relation, is a
-        binarization artifact (parsers can only emit binary splits, so an n-ary
-        multinuc comes out as nested same-relation multinucs). Such a child is
+        attaching edge and all of the child's own edges share one relation, is
         absorbed into its parent, recursively and regardless of branch shape
         (right/left/balanced). Mononuclear structure and genuinely nested
         *different*-relation multinucs (e.g. `List[A, Joint[B, C]]`) are left
         intact, since the relation guard only fires when labels match through.
+
+        Opt-in, for human-facing export only. It cannot distinguish
+        binarization artifacts (parsers emit binary splits, so an n-ary
+        multinuc comes out as a nested same-relation chain) from
+        annotator-chosen same-relation nesting, which gold RST-DT/GUM trees do
+        contain, so flattening is lossy on gold trees. `to_rs4_string` writes
+        the tree as-is for exactly that reason.
 
         Non-mutating: `self` stays binary. The result is non-binary and so is
         serialization-only. Do not call `spans()`/`parsing_actions()` on it.
@@ -422,6 +437,18 @@ class RstTree:
                     continue
                 for ge in grandchild_edges:
                     ge.source = parent.id
+                # Secondary edges may reference the merged-away child. Re-point
+                # those endpoints to the absorbing parent (its yield is a
+                # superset of the child's). Drop the edge if re-pointing makes
+                # it a self-loop or points it at the root, since the RstTree
+                # constructor requires the root to have no incoming edges.
+                for se in [se for se in edges if se.secondary and child.id in (se.source, se.target)]:
+                    if se.source == child.id:
+                        se.source = parent.id
+                    if se.target == child.id:
+                        se.target = parent.id
+                    if se.source == se.target or se.target == self.root.id:
+                        edges.remove(se)
                 edges.remove(e)
                 nodes.remove(child)
                 del node_map[child.id]
@@ -440,8 +467,26 @@ class RstTree:
         from lxml import etree as ET
         from lxml.builder import E
 
-        tree = self.debinarize()
-        relations = E("relations", *[E("rel", name=name, type=type) for name, type in tree._relation_types])
+        # Written as-is, without debinarize: a binary tree re-read with
+        # binarize=True is a fixed point, so write->re-read preserves the span
+        # set exactly. Flattening is opt-in via debinarize() for export.
+        tree = self
+        if tree._relation_types is not None:
+            relation_types = tree._relation_types
+        else:
+            # Fallback for trees built without an explicit inventory (e.g. a
+            # bare read_rst_file). Kind mirrors infer_relation_types: a
+            # relation is multinuc when it binds two or more children of a
+            # multinuc node, rst otherwise.
+            rels = set()
+            for e in tree._primary_edges:
+                if e.relation == "span":
+                    continue
+                same = sum(1 for s in tree._primary_edges if s.source == e.source and s.relation == e.relation)
+                is_multinuc = tree._node_map[e.source].type == "multinuc" and same >= 2
+                rels.add((tree._resolve_rel(e.relation), "multinuc" if is_multinuc else "rst"))
+            relation_types = sorted(rels)
+        relations = E("relations", *[E("rel", name=name, type=type) for name, type in relation_types])
         header = E("header", *[relations])
         body_children = []
         for edu in tree.edus:
@@ -501,8 +546,8 @@ class RstTree:
         """Serialize as an S-expression. Internal nodes carry a `NUC:relation`
         label with NUC in {NS, SN, NN}. Two output styles:
 
-        * Plan style (the default, when `format` is None). Used by the
-          `seq2seq_sexp` / `decoder_only_sexp` parsers. Leaves render as
+        * Plan style (the default, when `format` is None). Used by `gen`'s `sexp`
+          serialization. Leaves render as
           `(<edu surface tokens>)` when `include_text=True` (parens inside the
           surface text are escaped to `-LRB-`/`-RRB-`), or as the bare token
           `<edu>` when `include_text=False` (callers supply EDU surface forms

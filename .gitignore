@@ -14,3 +14,9 @@ CLAUDE.md
 *.egg-info/
 dist/
 /scripts/icl/
+
+# assembled prediction tree (derived; rebuild with scripts/build_preds.py)
+preds/
+
+# stray third-party corpus bundle (accidentally committed in 411feb4)
+corpora.zip

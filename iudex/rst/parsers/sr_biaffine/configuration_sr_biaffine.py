@@ -52,9 +52,13 @@ class SRBiaffineConfig(FromParams):
     patience: int = 10
     max_grad_norm: float = 1.0
     weight_decay: float = 0.01
-    # Linear warmup before linear decay. None uses a 1-epoch warmup
-    # (steps_per_epoch). 0 means no warmup. Any positive int is taken literally.
+    # Linear warmup before linear decay. `num_warmup_steps=None` (the default) warms
+    # up over `num_warmup_epochs` epochs (num_warmup_epochs * steps_per_epoch); an
+    # explicit int overrides with a literal step count (0 = no warmup).
     num_warmup_steps: int | None = None
+    # 5-epoch default = the discriminative standard (2026-07-27); see DMRSTConfig for
+    # the divergence rationale. Corpus-agnostic: scales this corpus's steps_per_epoch.
+    num_warmup_epochs: int = 5
     log_every: int = 50
     # Skip dev validation until this epoch (0 = validate from the start). In
     # HASH_EXCLUDE, so changing it is resume-safe. Applies within a validating

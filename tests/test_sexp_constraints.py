@@ -10,7 +10,6 @@ Action-id convention used throughout (no overlap with any source id):
     CLOSE_ID = 2
     EOS_ID   = 3
     COPY_ID  = 4
-    EDU_ID   = 5  (the `<edu>` placeholder, used only in include_text=False mode)
     LABEL_NS = 100
     LABEL_SN = 101
     LABEL_NN = 102
@@ -21,17 +20,13 @@ from __future__ import annotations
 
 import pytest
 
-from iudex.rst.parsers.common.sexp_constraints import (
-    SexpDecodingState,
-    make_initial_state,
-)
+from iudex.rst.parsers.common.sexp_constraints import SexpDecodingState
 
 
 OPEN_ID = 1
 CLOSE_ID = 2
 EOS_ID = 3
 COPY_ID = 4
-EDU_ID = 5
 LABEL_NS = 100
 LABEL_SN = 101
 LABEL_NN = 102
@@ -44,13 +39,12 @@ def _make(
     use_copy: bool = False,
     *,
     source_ids=None,
-    edu_placeholder_id=None,
     min_edu_length: int = 1,
 ) -> SexpDecodingState:
     if source_ids is None and not use_copy:
         # Default: 10, 11, 12, ... one per source position.
         source_ids = [10 + i for i in range(source_len)]
-    return make_initial_state(
+    return SexpDecodingState(
         source_len=source_len,
         traversal_order=traversal_order,
         use_copy=use_copy,
@@ -59,8 +53,7 @@ def _make(
         eos_id=EOS_ID,
         label_ids=LABEL_IDS,
         copy_id=COPY_ID if use_copy else None,
-        source_ids=source_ids,
-        edu_placeholder_id=edu_placeholder_id,
+        source_ids=tuple(source_ids or ()),
         min_edu_length=min_edu_length,
     )
 
@@ -94,28 +87,14 @@ def test_empty_prefix_only_open_legal_postorder():
     assert s.legal_actions() == frozenset({OPEN_ID})
 
 
-def test_empty_prefix_admits_edu_placeholder_when_configured():
-    s = _make(source_len=1, use_copy=True, edu_placeholder_id=EDU_ID)
-    assert s.legal_actions() == frozenset({OPEN_ID, EDU_ID})
-
-
-def test_make_initial_state_validates_source_ids_length():
+def test_state_validates_source_ids_length():
     with pytest.raises(ValueError):
-        make_initial_state(
-            source_len=3,
-            traversal_order="preorder",
-            use_copy=False,
-            open_id=OPEN_ID,
-            close_id=CLOSE_ID,
-            eos_id=EOS_ID,
-            label_ids=LABEL_IDS,
-            source_ids=[10, 11],  # short by one
-        )
+        _make(source_len=3, source_ids=[10, 11])  # short by one
 
 
-def test_make_initial_state_validates_copy_id_when_use_copy():
+def test_state_validates_copy_id_when_use_copy():
     with pytest.raises(ValueError):
-        make_initial_state(
+        SexpDecodingState(
             source_len=2,
             traversal_order="preorder",
             use_copy=True,
@@ -129,16 +108,7 @@ def test_make_initial_state_validates_copy_id_when_use_copy():
 
 def test_unknown_traversal_order_rejected():
     with pytest.raises(ValueError):
-        make_initial_state(
-            source_len=1,
-            traversal_order="inorder",
-            use_copy=True,
-            open_id=OPEN_ID,
-            close_id=CLOSE_ID,
-            eos_id=EOS_ID,
-            label_ids=LABEL_IDS,
-            copy_id=COPY_ID,
-        )
+        _make(source_len=1, traversal_order="inorder", use_copy=True)
 
 
 # ---------------------------------------------------------------------------
@@ -540,20 +510,16 @@ def test_source_token_emit_blocked_at_cursor_eq_source_len():
 
 def test_source_token_emit_advances_cursor_use_copy_false():
     """Emitting the expected source token (use_copy=False) advances the
-    cursor by exactly one. `expected_source_id()` is only defined once
-    the span's kind has resolved to `leaf` (i.e. after at least one
-    content token has been emitted), so we check it post-emission."""
+    cursor by exactly one, and only the token at the cursor is legal."""
     s = _make(source_len=3)  # source_ids = [10, 11, 12]
     s = s.step(OPEN_ID).step(LABEL_NS).step(OPEN_ID)
     assert s.cursor == 0
-    # Just-opened span: kind unresolved, expected_source_id is None.
-    assert s.expected_source_id() is None
-    # The legal action set still contains source_ids[0] (the leaf path).
     assert 10 in s.legal_actions()
     s2 = s.step(10)
     assert s2.cursor == 1
     assert s2.in_edu_leaf
-    assert s2.expected_source_id() == 11
+    assert 11 in s2.legal_actions()
+    assert 12 not in s2.legal_actions()
 
 
 def test_copy_token_advances_cursor_use_copy_true():
@@ -563,8 +529,6 @@ def test_copy_token_advances_cursor_use_copy_true():
     assert s.cursor == 0
     s2 = s.step(COPY_ID)
     assert s2.cursor == 1
-    # The constraint state never reveals a specific source id in copy mode.
-    assert s2.expected_source_id() is None
 
 
 def test_label_at_wrong_slot_rejected_preorder():
@@ -723,45 +687,26 @@ def test_min_edu_length_default_does_not_change_behavior():
 
 
 # ---------------------------------------------------------------------------
-# constrain_content=False wildcard obligation gate
+# Leaf budget gate: content is withheld once every remaining position is
+# reserved for a future leaf start.
 # ---------------------------------------------------------------------------
 
 
-def _make_cc_false(source_len: int) -> SexpDecodingState:
-    return make_initial_state(
-        source_len=source_len,
-        traversal_order="postorder",
-        use_copy=False,
-        open_id=OPEN_ID,
-        close_id=CLOSE_ID,
-        eos_id=EOS_ID,
-        label_ids=LABEL_IDS,
-        source_ids=[10 + i for i in range(source_len)],
-        constrain_content=False,
-    )
-
-
-def test_cc_false_wildcard_respects_leaf_budget_gate():
-    """Under constrain_content=False, `content_is_wildcard()` must honor the
-    same leaf budget gate as `legal_actions` (content illegal once every
-    remaining position is reserved for a future leaf start). Regression: the
-    wildcard predicate skipped the gate, the mask admitted content into
-    reserved positions, and the decode later deadlocked on an empty legal set
-    (an internal node owed a child with the source exhausted)."""
-    # OPEN root, OPEN first child, eat one content token into that child.
-    # The parent is now internal with its 2nd child still owed (obl_rest=1).
-    state = _make_cc_false(2).step(OPEN_ID).step(OPEN_ID).step(10)
+def test_leaf_budget_gate_reserves_positions_for_future_leaves():
+    """Eating must not consume a position reserved for a distinct future leaf
+    start. OPEN root, OPEN first child, eat one content token: the parent is
+    now internal with its 2nd child still owed (obl_rest=1), and the last
+    source position is reserved for that sibling leaf, so content must NOT be
+    offered. CLOSE must be."""
+    state = _make(2, traversal_order="postorder").step(OPEN_ID).step(OPEN_ID).step(10)
     assert state.in_edu_leaf
-    # remaining_content == 1 == obl_rest: the last position is reserved for
-    # the sibling leaf, so content must NOT be offered. CLOSE must be.
     assert state.remaining_content == 1
-    assert not state.content_is_wildcard()
-    assert CLOSE_ID in state.legal_actions()
+    assert state.legal_actions() == frozenset({CLOSE_ID})
 
 
-def test_cc_false_wildcard_open_when_budget_allows():
-    """Same prefix with one spare position: content is still wildcarded."""
-    state = _make_cc_false(3).step(OPEN_ID).step(OPEN_ID).step(10)
+def test_leaf_budget_gate_allows_content_when_budget_allows():
+    """Same prefix with one spare position: content stays offered."""
+    state = _make(3, traversal_order="postorder").step(OPEN_ID).step(OPEN_ID).step(10)
     assert state.in_edu_leaf
     assert state.remaining_content == 2  # 1 reserved for the sibling, 1 spare
-    assert state.content_is_wildcard()
+    assert 11 in state.legal_actions()

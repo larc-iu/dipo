@@ -27,6 +27,10 @@ class ParserSpec:
     # cluster (seq2seq_* / decoder_only_*) shares fields, so inference relies on
     # a field-set heuristic when the sidecar stamp is absent (older runs).
     signature_field: str
+    # False for API-client parsers (e.g. `icl`) that have no torch checkpoint.
+    # The shared `push` / `predict` / `runs` machinery assumes a checkpoint, so it
+    # does not apply to them (they own bespoke command modules instead).
+    is_torch_model: bool = True
 
     def load_config_cls(self) -> type:
         mod = importlib.import_module(f"{self.package}.configuration_{self.name}")
@@ -62,36 +66,29 @@ PARSERS: dict[str, ParserSpec] = {
         supports_text=True,
         signature_field="attention_type",
     ),
-    "seq2seq_sr": ParserSpec(
-        name="seq2seq_sr",
-        package="iudex.rst.parsers.seq2seq_sr",
-        config_cls="Seq2SeqSRConfig",
-        parser_cls="Seq2SeqSRParser",
+    "gen": ParserSpec(
+        name="gen",
+        package="iudex.rst.parsers.gen",
+        config_cls="GenConfig",
+        parser_cls="GenParser",
         supports_text=True,
-        signature_field="num_beams",
+        # `backbone` (a discriminator) is unique to GenConfig; checkpoints also carry
+        # an explicit parser_kind="gen" stamp, which `runs list` prefers.
+        signature_field="backbone",
     ),
-    "decoder_only_sr": ParserSpec(
-        name="decoder_only_sr",
-        package="iudex.rst.parsers.decoder_only_sr",
-        config_cls="DecoderOnlySRConfig",
-        parser_cls="DecoderOnlySRParser",
+    # In-context-learning parser: an API client, not a torch model. It has no
+    # training and no checkpoint, so it owns bespoke predict_icl / eval_icl
+    # commands (the shared run_predict / push / runs-list machinery does not
+    # apply and is never invoked for it). Registered here only so the dispatcher
+    # routes `iudex icl <cmd>`. config_cls/parser_cls resolve for completeness;
+    # supports_text is moot (the bespoke CLI does not consult it).
+    "icl": ParserSpec(
+        name="icl",
+        package="iudex.rst.parsers.icl",
+        config_cls="IclConfig",
+        parser_cls="IclParser",
         supports_text=True,
-        signature_field="causal_mode",
-    ),
-    "seq2seq_sexp": ParserSpec(
-        name="seq2seq_sexp",
-        package="iudex.rst.parsers.seq2seq_sexp",
-        config_cls="Seq2SeqSexpConfig",
-        parser_cls="Seq2SeqSexpParser",
-        supports_text=True,
-        signature_field="traversal_order",
-    ),
-    "decoder_only_sexp": ParserSpec(
-        name="decoder_only_sexp",
-        package="iudex.rst.parsers.decoder_only_sexp",
-        config_cls="DecoderOnlySexpConfig",
-        parser_cls="DecoderOnlySexpParser",
-        supports_text=True,
-        signature_field="use_copy",
+        signature_field="pipeline_mode",
+        is_torch_model=False,
     ),
 }

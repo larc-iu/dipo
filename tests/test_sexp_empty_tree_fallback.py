@@ -1,9 +1,16 @@
-"""Fix 4 regression: when `_tree_from_emitted` falls back to `_empty_tree`
-(because `RstTree.from_sexp` raised), the
-predict path must null out `_pred_edu_source_ranges` so downstream
-gold-EDU eval doesn't see action-derived ranges that disagree with the
-single-EDU fallback (which would silently filter the doc out of the
-parseval aggregator)."""
+"""`build_tree` distinguishes a malformed stream from a merely bad one.
+
+MALFORMED (`from_sexp` rejects the string) is unreachable: the PDA admits only
+well-formed sexps, content is pinned to the source cursor, and `(`/`)` in it are
+escaped. Reaching it means the constraints are broken, so it raises rather than
+fabricating a single-EDU tree that would score as if the model produced it.
+
+DEEP is different and does happen: a legal action sequence can build a tree past
+CPython's recursion limit (see test_sr_deep_tree_degrades.py). The mask and the
+automaton agree there -- it is a bad parse, not a bug -- so it still degrades to
+a single-EDU tree, flagged `_from_sexp_failed`, with `stash_meta` nulling the
+action-derived ranges that the one-EDU tree would contradict.
+"""
 
 import os
 
@@ -11,21 +18,23 @@ import pytest
 
 pytest.importorskip("transformers")
 
+from iudex.rst.data.tree import Reduce, RstTree, Shift
+from iudex.rst.parsers.gen.configuration_gen import GenConfig
+from iudex.rst.parsers.gen.errors import DecodeInvariantError
+from iudex.rst.parsers.gen.modeling_gen import GenParser
 
 SMALL_CAUSAL = os.environ.get("IUDEX_TEST_CAUSAL_MODEL", "hf-internal-testing/tiny-random-Gemma3ForCausalLM")
 SMALL_SEQ2SEQ = os.environ.get("IUDEX_TEST_SEQ2SEQ_MODEL", "google-t5/t5-small")
 
 
-def test_decoder_only_sexp_fallback_marks_failure():
-    """Calling `_tree_from_emitted` with a malformed action stream falls
-    back to the empty tree and marks it with `_from_sexp_failed=True`."""
-    from iudex.rst.parsers.decoder_only_sexp.configuration_decoder_only_sexp import DecoderOnlySexpConfig
-    from iudex.rst.parsers.decoder_only_sexp.modeling_decoder_only_sexp import DecoderOnlySexpParser
-
-    cfg = DecoderOnlySexpConfig(
+def _gen(backbone: str) -> GenParser:
+    model = SMALL_CAUSAL if backbone == "decoder_only" else SMALL_SEQ2SEQ
+    d = dict(
+        backbone=backbone,
+        serialization="sexp",
         train_dir="<unused>",
         dev_dir="<unused>",
-        model_name=SMALL_CAUSAL,
+        model_name=model,
         relation_types=[("elaboration", "rst")],
         gradient_checkpointing=False,
         amp=False,
@@ -36,68 +45,57 @@ def test_decoder_only_sexp_fallback_marks_failure():
         use_copy=True,
     )
     try:
-        parser = DecoderOnlySexpParser(cfg)
+        return GenParser(GenConfig.from_dict(d))
     except Exception as e:
-        pytest.skip(f"Could not load {SMALL_CAUSAL}: {e!r}")
-    # An empty emission yields an empty sexp string, which RstTree.from_sexp
-    # rejects -> empty-tree fallback path runs.
-    tree = parser._tree_from_emitted([], source_ids=[0, 1, 2])
-    assert getattr(tree, "_from_sexp_failed", False) is True
+        pytest.skip(f"Could not load {model}: {e!r}")
 
 
-def test_seq2seq_sexp_fallback_attaches_marker():
-    """The seq2seq_sexp parser's `_actions_to_sexp_string` always produces
-    a parseable sexp by design (best-effort closing + degenerate-leaf
-    fallback), so triggering the post-`from_sexp` fallback in isolation
-    is awkward. We verify the source-level invariant: the exception
-    handler sets `_from_sexp_failed = True` on the empty tree before
-    returning it, AND the marker handling is centralized in `_finalize_tree`
-    (which nulls out `_pred_edu_source_ranges` on a marked tree), AND the
-    three predict paths all funnel through `_finalize_tree`."""
-    import inspect
-
-    from iudex.rst.parsers.seq2seq_sexp.modeling_seq2seq_sexp import Seq2SeqSexpParser
-
-    src_make = inspect.getsource(Seq2SeqSexpParser._tree_from_emitted)
-    assert "_from_sexp_failed = True" in src_make
-    src_finalize = inspect.getsource(Seq2SeqSexpParser._finalize_tree)
-    assert "_from_sexp_failed" in src_finalize, "_finalize_tree doesn't honor _from_sexp_failed"
-    for name in ("_predict_one_greedy", "_predict_one_beam", "_predict_one_gold_edu"):
-        src = inspect.getsource(getattr(Seq2SeqSexpParser, name))
-        assert "_finalize_tree" in src, f"{name} doesn't funnel through _finalize_tree"
+@pytest.mark.parametrize("backbone", ["decoder_only", "seq2seq"])
+def test_sexp_build_tree_raises_on_malformed_output(backbone):
+    """A malformed (empty) action stream -> empty sexp string, which
+    RstTree.from_sexp rejects. That must surface, not become a single-EDU tree."""
+    ser = _gen(backbone).serialization
+    with pytest.raises(DecodeInvariantError, match="from_sexp rejected"):
+        ser.build_tree([], [0, 1, 2])
 
 
-def test_decoder_only_sexp_predict_paths_honor_marker():
-    """Same source-level invariant for decoder_only_sexp."""
-    import inspect
+def _toy_tree():
+    return RstTree.from_shift_reduce(
+        [Shift(edu_text="a"), Shift(edu_text="b"), Reduce(nuc="NS", rel="elaboration")],
+        relation_types=[("elaboration", "rst")],
+    )
 
-    from iudex.rst.parsers.decoder_only_sexp.modeling_decoder_only_sexp import DecoderOnlySexpParser
 
-    src_make = inspect.getsource(DecoderOnlySexpParser._tree_from_emitted)
-    assert "_from_sexp_failed = True" in src_make
-    src_finalize = inspect.getsource(DecoderOnlySexpParser._finalize_tree)
-    assert "_from_sexp_failed" in src_finalize, "_finalize_tree doesn't honor _from_sexp_failed"
-    for name in ("_predict_one_greedy", "_predict_one_beam", "_predict_one_gold_edu"):
-        src = inspect.getsource(getattr(DecoderOnlySexpParser, name))
-        assert "_finalize_tree" in src, f"{name} doesn't funnel through _finalize_tree"
+@pytest.mark.parametrize("backbone", ["decoder_only", "seq2seq"])
+def test_sexp_stash_meta_keeps_ranges_for_a_real_tree(backbone):
+    ser = _gen(backbone).serialization
+    tree = _toy_tree()
+    ser.stash_meta(tree, [(0, 1), (1, 2)], [0, 1, 2])
+    assert tree._pred_edu_source_ranges == [(0, 1), (1, 2)]
+
+
+@pytest.mark.parametrize("backbone", ["decoder_only", "seq2seq"])
+def test_sexp_stash_meta_nulls_ranges_for_a_degraded_tree(backbone):
+    """A degraded (pathologically-deep) tree has one EDU, so the action-tracked
+    ranges disagree with it and must be nulled."""
+    ser = _gen(backbone).serialization
+    tree = _toy_tree()
+    tree._from_sexp_failed = True
+    ser.stash_meta(tree, [(0, 1), (1, 2)], [0, 1, 2])
+    assert tree._pred_edu_source_ranges == []
 
 
 def test_use_copy_false_is_constructible():
-    """`use_copy=False` is the no-COPY mode (Hu and Wan 2023 mirror). Both
-    configs should accept it without raising. The full-vocab head and
-    source-id in-stream emission are wired up in their respective parsers."""
-    from iudex.rst.parsers.decoder_only_sexp.configuration_decoder_only_sexp import DecoderOnlySexpConfig
-    from iudex.rst.parsers.seq2seq_sexp.configuration_seq2seq_sexp import Seq2SeqSexpConfig
-
-    Seq2SeqSexpConfig(
-        train_dir="<unused>",
-        dev_dir="<unused>",
-        relation_types=[("elaboration", "rst")],
-        use_copy=False,
-    )
-    DecoderOnlySexpConfig(
-        train_dir="<unused>",
-        dev_dir="<unused>",
-        relation_types=[("elaboration", "rst")],
-        use_copy=False,
-    )
+    """`use_copy=False` is the no-COPY mode (Hu and Wan 2023 mirror). Both sexp
+    backbones' configs should accept it without raising."""
+    for backbone in ("decoder_only", "seq2seq"):
+        GenConfig.from_dict(
+            dict(
+                backbone=backbone,
+                serialization="sexp",
+                train_dir="<unused>",
+                dev_dir="<unused>",
+                relation_types=[("elaboration", "rst")],
+                use_copy=False,
+            )
+        )

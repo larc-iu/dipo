@@ -96,7 +96,7 @@ def _evaluate_on_dev(
     return metrics
 
 
-def train(cfg: DMRSTConfig) -> None:
+def train(cfg: DMRSTConfig, eval_only: bool = False) -> None:
     """Full training loop with dynamic loss weighting (paper §3.2): the
     `split_loss`, `label_loss`, and (when joint segmentation is on)
     `seg_loss` are combined with weights that adapt to the recent
@@ -111,6 +111,25 @@ def train(cfg: DMRSTConfig) -> None:
     if cfg.relation_map is not None:
         dim(f"Applying `relation_map` ({len(cfg.relation_map)} entries) to all read trees.")
     cfg.relation_types = infer_relation_types([cfg.train_dir, cfg.dev_dir], relation_map=cfg.relation_map)
+    if eval_only:
+        # The label set is fixed at TRAINING time and must be reused verbatim at
+        # inference. Re-inferring it here would be silent corruption whenever the
+        # data or the reader has changed since: `relation_types` is HASH_EXCLUDEd
+        # and `train_dir` is hashed by path rather than content, so a drifted
+        # inventory of the same size loads into the old weights without error and
+        # simply permutes what every predicted label means. Take the training
+        # set from the checkpoint, and say so when it differs.
+        best_path = os.path.join(run_dir, "best_model.pt")
+        if os.path.exists(best_path):
+            stored = torch.load(best_path, map_location="cpu", weights_only=False).get("config", {}).get("relation_types")
+            if stored is not None:
+                stored = [tuple(x) for x in stored]
+                if stored != list(cfg.relation_types):
+                    warn(
+                        f"Label set drift: checkpoint has {len(stored)} (relation, kind) pairs, the data now "
+                        f"yields {len(cfg.relation_types)}. Using the checkpoint's, which is what the weights mean."
+                    )
+                cfg.relation_types = stored
     dim(
         f"Inferred {len(cfg.relation_types)} (relation, kind) pairs from "
         f"{cfg.train_dir} + {cfg.dev_dir}"
@@ -152,10 +171,11 @@ def train(cfg: DMRSTConfig) -> None:
             if cfg.edu_loss_weight_exponent
             else None
         )
-        spe = max(1, len(phase_trees) // cfg.grad_accum)
+        # ceil, not floor: the trailing partial accumulation window is stepped too.
+        spe = max(1, math.ceil(len(phase_trees) / cfg.grad_accum))
         phase_specs.append((phase, phase_trees, wtab, spe))
         total_steps += spe * phase.epochs
-    warmup = phase_specs[0][3] if cfg.num_warmup_steps is None else cfg.num_warmup_steps
+    warmup = phase_specs[0][3] * cfg.num_warmup_epochs if cfg.num_warmup_steps is None else cfg.num_warmup_steps
 
     # Flatten phases to a per-absolute-epoch spec so the single epoch loop (and
     # resume by absolute epoch) stays unchanged.
@@ -238,7 +258,7 @@ def train(cfg: DMRSTConfig) -> None:
         )
 
     def _validate(epoch: int, epoch_in_phase: int, dev_set: list) -> None:
-        nonlocal best_val, stale
+        nonlocal best_val, stale, best_smoothed
         # Empty dev_set => the curriculum suppresses validation for this phase
         # (e.g. subtree warmup phases). begin_validation_epoch counts epochs
         # WITHIN the phase, so it skips the first N slow early evals of a
@@ -255,14 +275,26 @@ def train(cfg: DMRSTConfig) -> None:
         tb.log_scalars("dev", metrics, global_step)
         console.print(metrics_table(metrics, title=f"Dev @ step {global_step}"))
         score = metrics[cfg.val_metric_name]
+        # Checkpoint SELECTION is raw argmax on dev.
         if score > best_val:
             best_val = score
-            stale = 0
             _save(os.path.join(run_dir, "best_model.pt"), epoch)
             success(f"  New best! {cfg.val_metric_name}={best_val:.4f}")
+        # STOPPING counts on a trailing mean of the last `patience_window` scores,
+        # so patience tracks real plateaus rather than per-epoch dev noise (raw dev
+        # truncated runs at ep12-30/100). `stale` advances only once the window is
+        # full and the smoothed score fails to beat its best (no min-delta).
+        recent_dev.append(score)
+        if len(recent_dev) < cfg.patience_window:
+            dim(f"  Stop-window filling ({len(recent_dev)}/{cfg.patience_window})")
         else:
-            stale += 1
-            dim(f"  No improvement ({stale}/{cfg.patience})")
+            smoothed = sum(recent_dev) / len(recent_dev)
+            if smoothed > best_smoothed:
+                best_smoothed = smoothed
+                stale = 0
+            else:
+                stale += 1
+            dim(f"  Smoothed {smoothed:.4f} (best {best_smoothed:.4f}, stale {stale}/{cfg.patience})")
         model.train()
 
     aborted = install_abort_handler()
@@ -271,6 +303,10 @@ def train(cfg: DMRSTConfig) -> None:
         reason = "all epochs completed" if start_epoch >= total_epochs else "patience exhausted"
         dim(f"Skipping training: {reason} on prior run; jumping to final evaluation.")
 
+    # Smoothed early-stop state (not persisted across resume; refills in
+    # <= patience_window validations, like the generative trainer).
+    recent_dev: deque = deque(maxlen=cfg.patience_window)
+    best_smoothed = -1.0
     recent_losses = deque(maxlen=200)
     rng = random.Random(cfg.seed)
     if not training_complete:
@@ -278,7 +314,11 @@ def train(cfg: DMRSTConfig) -> None:
     training_start = time.monotonic()
 
     prev_phase = None
-    for epoch in range(start_epoch, total_epochs):
+    # `eval_only` re-runs the Final Evaluation below against the saved
+    # best_model.pt without touching training. Needed whenever a change affects
+    # how PREDICTIONS are written but not how the model is fit -- retraining
+    # would re-roll run-to-run variance and move numbers that should not move.
+    for epoch in range(start_epoch, total_epochs if not eval_only else start_epoch):
         if stale >= cfg.patience or aborted.value:
             break
         phase, phase_trees, wtab, spe = epoch_to_spec[epoch]
@@ -294,6 +334,8 @@ def train(cfg: DMRSTConfig) -> None:
             # best/patience so prior phases cannot block saves or trip early-stop.
             if dev_set and (epoch == 0 or epoch_to_spec[epoch - 1][0] is not phase):
                 best_val, stale = -1.0, 0
+                best_smoothed = -1.0
+                recent_dev.clear()
             prev_phase = phase
         trees = list(phase_trees)
         rng.shuffle(trees)
@@ -329,6 +371,14 @@ def train(cfg: DMRSTConfig) -> None:
                 recent_losses.append(raw_loss)
                 total_loss += raw_loss
                 num_trees += 1
+
+                # Drop this tree's graph references before the next forward
+                # allocates: otherwise `out`/`loss` stay alive across the loop
+                # boundary and the previous document's activations overlap the
+                # next one's peak. Numerically inert.
+                del out, loss
+                if cfg.empty_cache_between_docs and device.type == "cuda":
+                    torch.cuda.empty_cache()
 
                 is_step = (tree_idx + 1) % cfg.grad_accum == 0 or (tree_idx + 1) == len(trees)
                 if not is_step:
@@ -429,7 +479,7 @@ def train(cfg: DMRSTConfig) -> None:
     rule("Final Evaluation")
     best_path = os.path.join(run_dir, "best_model.pt")
     if os.path.exists(best_path):
-        checkpoint = torch.load(best_path, weights_only=False)
+        checkpoint = torch.load(best_path, map_location="cpu", weights_only=False)
         model.load_state_dict(checkpoint["model_state_dict"])
         model.eval()
         dev_m = _evaluate_on_dev(
@@ -454,6 +504,11 @@ def train(cfg: DMRSTConfig) -> None:
         with open(metrics_path, "w", encoding="utf-8") as f:
             json.dump(final_metrics, f, indent=2)
         wrote(metrics_path)
+    elif eval_only:
+        # Nothing was trained and there is nothing to evaluate: exiting 0 here
+        # would let a typo'd config look like a successful re-eval while writing
+        # no final_metrics.json at all.
+        raise FileNotFoundError(f"--eval-only found no checkpoint to evaluate at {best_path}")
     else:
         success(f"Training complete. Best {cfg.val_metric_name}: {best_val:.4f}")
     tb.close()
@@ -462,9 +517,11 @@ def train(cfg: DMRSTConfig) -> None:
 def main():
     parser = argparse.ArgumentParser(description="Train the dmrst parser")
     parser.add_argument("config", help="Path to a jsonnet config file")
+    parser.add_argument("--eval-only", action="store_true",
+                        help="skip training; re-run the final evaluation from the saved best_model.pt")
     args = parser.parse_args()
     cfg = DMRSTConfig.from_dict(Params.from_file(args.config).as_dict(quiet=True))
-    train(cfg)
+    train(cfg, eval_only=args.eval_only)
 
 
 if __name__ == "__main__":

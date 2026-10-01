@@ -9,7 +9,7 @@ import torch
 from tonga import Params
 
 from iudex.common.log import console
-from iudex.common.training import derive_run_id
+from iudex.common.training import derive_run_id, load_model_state
 from iudex.rst import HASH_EXCLUDE
 
 ConfigT = TypeVar("ConfigT")
@@ -56,11 +56,14 @@ def load_parser_from_checkpoint(
     *,
     compile_encoder: bool = False,
 ) -> ParserT:
-    """Rehydrate a parser from a `.pt` checkpoint into eval mode on `device`."""
+    """Rehydrate a parser from a `.pt` checkpoint into eval mode on `device`.
+    Trainable-only checkpoints (see `save_checkpoint`) work here because
+    `parser_cls(cfg)` pulls fresh base weights from HF before the non-strict
+    load overlays the trained parameters."""
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     cfg = config_cls.from_dict(checkpoint["config"])
     model = parser_cls(cfg, compile_encoder=compile_encoder)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    load_model_state(model, checkpoint)
     return model.to(device).eval()
 
 

@@ -110,12 +110,42 @@ class DMRSTConfig(FromParams):
     # bf16 autocast on the training forward (CUDA only; bf16 needs no GradScaler).
     # Set false for full-fp32 training. Inference is always fp32.
     amp: bool = True
+    # Return PyTorch's cached-but-free blocks to the driver between documents.
+    # Purely a memory-management knob (numerically inert, HASH_EXCLUDEd): peak
+    # memory here is one document's decoder graph, and documents vary widely in
+    # EDU count, so blocks cached for a short document can be too fragmented to
+    # satisfy a long one's larger allocation. Costs a synchronize per document,
+    # so it is off by default and only worth enabling for backbones that sit near
+    # the card's limit (XLM-R XXL on GUM).
+    empty_cache_between_docs: bool = False
+    # Recompute each decoder span decision during backward instead of keeping
+    # every step's activations alive. The decoder dominates this parser's memory:
+    # measured on a 250-EDU document with XLM-R XXL, it held 49.0GB against the
+    # already-checkpointed encoder's 1.5GB, and enabling this cut it to 1.5GB --
+    # peak 83.8GB -> 36.7GB. Off by default because it is a loss on small
+    # backbones, where the bookkeeping exceeds the activations saved (measured
+    # +17% peak on a 150M encoder). Numerically inert and HASH_EXCLUDEd; costs a
+    # second decoder forward, negligible beside the encoder.
+    checkpoint_decoder: bool = False
     patience: int = 10
+    # Early stopping counts on a trailing mean of the last `patience_window` dev
+    # scores rather than raw per-epoch dev (which is noisy, so a raw running-max
+    # makes patience fire on a noise dip mid-schedule and truncates the run before
+    # the LR decay tail). Checkpoint SELECTION stays raw argmax on `val_metric_name`.
+    # HASH_EXCLUDEd (selection-side, resume-safe).
+    patience_window: int = 5
     max_grad_norm: float = 5.0
     weight_decay: float = 0.01
-    # Linear warmup before linear decay. None uses a 1-epoch warmup
-    # (steps_per_epoch). 0 means no warmup. Any positive int is taken literally.
+    # Linear warmup before linear decay. `num_warmup_steps=None` (the default) warms
+    # up over `num_warmup_epochs` epochs (num_warmup_epochs * steps_per_epoch); an
+    # explicit int overrides with a literal step count (0 = no warmup).
     num_warmup_steps: int | None = None
+    # The 5-epoch default is the discriminative standard (2026-07-27). The old
+    # 1-epoch ramp let EuroBERT >=610m diverge on RST-DT the instant the LR hit peak
+    # (2.1B loss 12->60 at epoch 2, exactly at warmup exit); a 5-epoch ramp reaches
+    # 3e-4 gently enough to hold. Corpus-agnostic: it scales each corpus's own
+    # steps_per_epoch, so RST-DT (103/epoch -> 515) and GUM differ automatically.
+    num_warmup_epochs: int = 5
     log_every: int = 50
     # Skip dev validation until this epoch (0 = validate from the start). In
     # HASH_EXCLUDE, so changing it is resume-safe. Applies within a validating

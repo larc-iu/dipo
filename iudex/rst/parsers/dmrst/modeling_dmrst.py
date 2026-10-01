@@ -3,6 +3,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.utils.checkpoint
 
 from iudex.rst.data.reader import determine_label_index
 from iudex.rst.data.tree import RstTree
@@ -378,8 +379,10 @@ class DMRSTParser(nn.Module):
         # 2. Keep only the top layer -> [num_directions=2, batch=1, H/2].
         gru_hidden = gru_hidden[-1]
         # 3. Batch first, then flatten the two directions into one hidden dim
-        #    of size 2 * (H/2) = H. Result: [num_decoder_layers=1, batch=1, H].
-        decoder_init = gru_hidden.transpose(0, 1).reshape(1, 1, H).contiguous()
+        #    of size 2 * (H/2) = H, then seed every decoder layer with the same
+        #    summary state (the decoder GRU is num_rnn_layers deep). Result:
+        #    [num_rnn_layers, batch=1, H].
+        decoder_init = gru_hidden.transpose(0, 1).reshape(1, 1, H).repeat(self.config.num_rnn_layers, 1, 1).contiguous()
 
         final_reprs = []
         for i, (b, e) in enumerate(edu_mapping):
@@ -455,28 +458,16 @@ class DMRSTParser(nn.Module):
         while stack:
             b, e = stack.pop()
 
-            # One decoder step per span. The input (mean of the span's EDUs)
-            # grounds the GRU in "what I'm deciding about now". The carried
-            # hidden state grounds it in "what I've decided so far". The
-            # output becomes the query for pointer attention below.
-            decoder_input = edu_reprs[b:e].mean(0, keepdim=True).unsqueeze(0)
-            decoder_output, decoder_hidden = self.decoder(decoder_input, decoder_hidden)
-
             gold_split, gold_label_str = gold_decisions[(b, e)]
             gold_label_idx = self.label_index.index(gold_label_str)
 
-            if e - b == 2:
-                # Only one possible split. Skip pointer loss, use the two EDUs directly.
-                input_left = edu_reprs[b].unsqueeze(0)
-                input_right = edu_reprs[b + 1].unsqueeze(0)
-            else:
-                # Pointer attention: query is the decoder output, keys are the
-                # n-1 candidate split anchors edu_reprs[b:e-1].
-                split_logits = self.pointer(edu_reprs[b : e - 1], decoder_output.squeeze(0).squeeze(0))
-                gold_pointer_idx = torch.tensor([gold_split - b - 1], device=self.device)
-                split_losses.append(F.cross_entropy(split_logits, gold_pointer_idx))
+            split_loss_i, label_loss_i, decoder_hidden = self._run_span_step(
+                edu_reprs, decoder_hidden, b, e, gold_split, gold_label_idx
+            )
+            label_losses.append(label_loss_i)
 
-                input_left, input_right = self._build_label_inputs(edu_reprs, b, e, gold_split)
+            if e - b != 2:
+                split_losses.append(split_loss_i)
 
                 # Push right then left so left pops first. DFS left-first matches
                 # the order in which the sequential decoder sees decisions.
@@ -484,10 +475,6 @@ class DMRSTParser(nn.Module):
                     stack.append((gold_split, e))
                 if gold_split - b > 1:
                     stack.append((b, gold_split))
-
-            logits = self.label_classifier(input_left, input_right)
-            label_target = torch.tensor([gold_label_idx], device=self.device)
-            label_losses.append(F.cross_entropy(logits, label_target))
 
         split_loss = sum(split_losses) / len(split_losses) if split_losses else torch.zeros((), device=self.device)
         label_loss = sum(label_losses) / len(label_losses)
@@ -497,6 +484,71 @@ class DMRSTParser(nn.Module):
             "label_loss": label_loss,
             "seg_loss": seg_loss,
         }
+
+    def _span_step(
+        self,
+        edu_reprs: torch.Tensor,
+        decoder_hidden: torch.Tensor,
+        b: int,
+        e: int,
+        gold_split: int,
+        gold_label_idx: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """One teacher-forced span decision: (split loss, label loss, new hidden).
+
+        Split out of `forward`'s loop verbatim so the whole decision can be
+        wrapped in activation checkpointing (see `_run_span_step`). It is a pure
+        function of its arguments, which is what makes that wrapping sound: the
+        only state it carries is the GRU hidden, threaded in and back out.
+
+        The returned split loss is a zero for two-EDU spans, where the split is
+        forced and the pointer is skipped; the caller drops it rather than
+        averaging it in, preserving the original loss exactly.
+        """
+        # One decoder step per span. The input (mean of the span's EDUs)
+        # grounds the GRU in "what I'm deciding about now". The carried
+        # hidden state grounds it in "what I've decided so far". The
+        # output becomes the query for pointer attention below.
+        decoder_input = edu_reprs[b:e].mean(0, keepdim=True).unsqueeze(0)
+        decoder_output, decoder_hidden = self.decoder(decoder_input, decoder_hidden)
+
+        if e - b == 2:
+            # Only one possible split. Skip pointer loss, use the two EDUs directly.
+            split_loss = edu_reprs.new_zeros(())
+            input_left = edu_reprs[b].unsqueeze(0)
+            input_right = edu_reprs[b + 1].unsqueeze(0)
+        else:
+            # Pointer attention: query is the decoder output, keys are the
+            # n-1 candidate split anchors edu_reprs[b:e-1].
+            split_logits = self.pointer(edu_reprs[b : e - 1], decoder_output.squeeze(0).squeeze(0))
+            gold_pointer_idx = torch.tensor([gold_split - b - 1], device=self.device)
+            split_loss = F.cross_entropy(split_logits, gold_pointer_idx)
+
+            input_left, input_right = self._build_label_inputs(edu_reprs, b, e, gold_split)
+
+        logits = self.label_classifier(input_left, input_right)
+        label_target = torch.tensor([gold_label_idx], device=self.device)
+        label_loss = F.cross_entropy(logits, label_target)
+        return split_loss, label_loss, decoder_hidden
+
+    def _run_span_step(self, *args: Any) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """`_span_step`, optionally under activation checkpointing.
+
+        The decoder holds by far the most memory of any part of this parser: it
+        runs one step per span and keeps every step's activations alive until
+        backward, which on a 250-EDU document with a 10.7B encoder measured at
+        ~49GB (against ~1.5GB for the gradient-checkpointed encoder). Recomputing
+        each step in backward trades a second decoder forward -- cheap next to
+        the encoder -- for keeping only one step's activations at a time.
+
+        Off by default, so existing runs are untouched. `use_reentrant=False`
+        matches the encoder path and tolerates the frozen-base/LoRA case;
+        checkpoint preserves RNG state by default, so dropout draws are reused
+        on recompute and the result is numerically identical either way.
+        """
+        if not (self.config.checkpoint_decoder and self.training):
+            return self._span_step(*args)
+        return torch.utils.checkpoint.checkpoint(self._span_step, *args, use_reentrant=False)
 
     def _decode_actions(
         self,
@@ -564,7 +616,8 @@ class DMRSTParser(nn.Module):
             raise RuntimeError("predict_from_text requires `cfg.segmentation` to be non-null")
         self.eval()
 
-        ids = self.tokenizer.encode(text, add_special_tokens=False)
+        enc = self.tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
+        ids, offsets = enc["input_ids"], enc["offset_mapping"]
         if len(ids) == 0:
             # A 0-EDU tree is unconstructible (`RstTree.__init__` requires
             # exactly one root). Single-EDU is handled below.
@@ -580,10 +633,12 @@ class DMRSTParser(nn.Module):
         for end_inclusive in breaks:
             edu_mapping.append((prev, end_inclusive + 1))
             prev = end_inclusive + 1
-        edu_texts = [
-            self.tokenizer.decode(ids[b:e], skip_special_tokens=True, clean_up_tokenization_spaces=True).strip()
-            for b, e in edu_mapping
-        ]
+        # Slice the caller's own text rather than decoding ids back to text:
+        # decoding is lossy per-tokenizer (English punctuation spacing under
+        # clean_up_tokenization_spaces; XLM-R's SentencePiece drops Persian
+        # ZWNJ), which would hand the caller EDUs that do not appear verbatim in
+        # the document they passed in. See `predict_both` for the same fix.
+        edu_texts = [text[offsets[b][0]:offsets[e - 1][1]].strip() for b, e in edu_mapping]
 
         if len(edu_mapping) < 2:
             return RstTree.from_parsing_actions([], edu_texts, relation_types=self.config.relation_types)
@@ -611,12 +666,13 @@ class DMRSTParser(nn.Module):
             }
         """
         self.eval()
-        input_ids, gold_edu_mapping = tokenize_document(
+        input_ids, gold_edu_mapping, source_text, source_offsets = tokenize_document(
             self.tokenizer,
             tree.edu_strings,
             self.device,
             detokenizer=self.detokenizer,
             prefixes=tree.edu_prefixes if self.use_edu_prefixes else None,
+            return_source=True,
         )
         token_embeddings = self._encode_tokens(input_ids)
         normed = self.layer_norm(token_embeddings.float())
@@ -651,9 +707,15 @@ class DMRSTParser(nn.Module):
         for end_inclusive in pred_ends:
             pred_edu_mapping.append((prev, end_inclusive + 1))
             prev = end_inclusive + 1
-        ids_list = input_ids.tolist()
+        # Recover each predicted EDU by SLICING the source document, never by
+        # decoding its token ids. `decode` is lossy in tokenizer-specific ways
+        # -- it applied English punctuation spacing under
+        # clean_up_tokenization_spaces, and XLM-R's SentencePiece silently drops
+        # Persian ZWNJ -- so decoded EDUs did not reproduce the document they
+        # came from, and the DISRPT re-scorer had to fall back to its difflib
+        # projection. Slicing is exact for every script by construction.
         pred_edu_texts = [
-            self.tokenizer.decode(ids_list[b:e], skip_special_tokens=True, clean_up_tokenization_spaces=True).strip()
+            source_text[source_offsets[b][0]:source_offsets[e - 1][1]].strip()
             for b, e in pred_edu_mapping
         ]
 

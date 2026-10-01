@@ -13,8 +13,8 @@ Models:
   sr_biaffine      jhu-clsp/ettin-encoder-400m (gold-EDU Parseval, fast)
 
 Matrix is 11 runs: the 3 single-config parsers + 4 sexp variants each
-(preorder/postorder x copy/no-copy). The no-copy sexp runs use free-content
-generation (constrain_content=false), the most failure-prone decode path.
+(preorder/postorder x copy/no-copy). The no-copy sexp runs score source
+subwords over the full lm_head (content stays constrained to the source).
 
 Scheduler polls `nvidia-smi` free memory and launches a queued run whenever
 free >= --reserve-gb and fewer than --max-concurrent are running (so ~2 fit on
@@ -80,7 +80,6 @@ def _gen_base(model: str) -> dict:
         "label_smoothing": 0.1,
         "dev_max_docs": 16,  # bounds per-epoch eval; FINAL eval is full
         "num_beams": 1,  # greedy throughout (fast, deterministic)
-        "use_validity_constraints": True,
         "eval_decode_greedy": True,
         "min_edu_length": 1,
     }
@@ -143,13 +142,13 @@ def _sr_biaffine() -> dict:
 
 
 def _sexp_variant(base: dict, traversal: str, use_copy: bool) -> dict:
-    # use_copy=True requires constrain_content=True (config __post_init__);
-    # use_copy=False uses free-content generation, the riskiest decode path.
+    # Content is always constrained to the source cursor now (free-content
+    # generation was removed), so use_copy only picks the scoring path:
+    # <copy> sentinel + small head, or source subwords over the full lm_head.
     return {
         **base,
         "traversal_order": traversal,
         "use_copy": use_copy,
-        "constrain_content": True if use_copy else False,
     }
 
 

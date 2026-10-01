@@ -2,6 +2,7 @@ import argparse
 import dataclasses
 import json
 import logging
+import math
 import os
 import random
 import time
@@ -118,10 +119,11 @@ def train(cfg: TopdownBiaffineConfig) -> None:
             if cfg.edu_loss_weight_exponent
             else None
         )
-        spe = max(1, len(phase_trees) // cfg.grad_accum)
+        # ceil, not floor: the trailing partial accumulation window is stepped too.
+        spe = max(1, math.ceil(len(phase_trees) / cfg.grad_accum))
         phase_specs.append((phase, phase_trees, wtab, spe))
         total_steps += spe * phase.epochs
-    warmup = phase_specs[0][3] if cfg.num_warmup_steps is None else cfg.num_warmup_steps
+    warmup = phase_specs[0][3] * cfg.num_warmup_epochs if cfg.num_warmup_steps is None else cfg.num_warmup_steps
 
     # Flatten phases to a per-absolute-epoch spec so the single epoch loop (and
     # resume by absolute epoch) stays unchanged.
@@ -325,7 +327,7 @@ def train(cfg: TopdownBiaffineConfig) -> None:
     rule("Final Evaluation")
     best_path = os.path.join(run_dir, "best_model.pt")
     if os.path.exists(best_path):
-        checkpoint = torch.load(best_path, weights_only=False)
+        checkpoint = torch.load(best_path, map_location="cpu", weights_only=False)
         model.load_state_dict(checkpoint["model_state_dict"])
         model.eval()
         dev_m = _evaluate_on_dev(

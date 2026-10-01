@@ -1,5 +1,5 @@
 """Regression tests for the shared beam-search scoring helpers
-(`common/seqgen.py`), used by all four generative parsers' beam decoders.
+(`common/seqgen.py`), used by the unified generative parser's beam decoder.
 
 Covers two historical bugs:
 
@@ -81,22 +81,15 @@ def test_select_best_beam_prefers_finished():
     assert select_best_beam([truncated]) is truncated
 
 
-def test_all_four_parsers_use_shared_beam_step():
-    """All four parsers route beam expansion through `beam_topk_step` (where
-    the NaN guard and raw-scoring fix live)."""
+def test_gen_beam_decode_uses_shared_beam_step():
+    """The unified parser's single beam loop routes beam expansion through
+    `beam_topk_step` (where the NaN guard and raw-scoring fix live)."""
     import os
 
-    paths = [
-        "iudex/rst/parsers/seq2seq_sr/modeling_seq2seq_sr.py",
-        "iudex/rst/parsers/decoder_only_sr/modeling_decoder_only_sr.py",
-        "iudex/rst/parsers/seq2seq_sexp/modeling_seq2seq_sexp.py",
-        "iudex/rst/parsers/decoder_only_sexp/modeling_decoder_only_sexp.py",
-    ]
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    for rel in paths:
-        with open(os.path.join(repo_root, rel), encoding="utf-8") as f:
-            text = f.read()
-        assert "beam_topk_step(beam_scores, logits, legal, K)" in text, f"{rel} not using the shared beam step"
+    with open(os.path.join(repo_root, "iudex/rst/parsers/gen/decode.py"), encoding="utf-8") as f:
+        text = f.read()
+    assert "beam_topk_step(beam_scores, logits, legal, K)" in text, "gen decode not using the shared beam step"
     with open(os.path.join(repo_root, "iudex/rst/parsers/common/seqgen.py"), encoding="utf-8") as f:
         seqgen = f.read()
     assert "torch.isnan(cum)" in seqgen, "NaN guard missing from beam_topk_step"

@@ -10,9 +10,11 @@ import hashlib
 import json
 import logging
 import os
+import pickle
 import random
 import re
 import signal
+import zipfile
 from collections.abc import Sequence
 from typing import Any
 
@@ -46,7 +48,9 @@ logger = logging.getLogger(__name__)
 DEFAULT_HASH_EXCLUDE: tuple[str, ...] = (
     "run_name",
     "checkpoint_dir",
+    "checkpoint_trainable_only",
     "patience",
+    "patience_window",
     "log_every",
     "begin_validation_epoch",
     "validate_every",
@@ -89,9 +93,11 @@ def set_seeds(seed: int) -> None:
 
 
 def install_abort_handler():
-    """SIGINT soft-abort. First Ctrl-C sets `flag.value = True`. The
-    second restores the default handler so a hung cleanup path is still
-    hard-killable. Returns the flag object."""
+    """SIGINT/SIGTERM soft-abort. The first signal sets `flag.value = True`
+    (finish the current step, checkpoint, exit cleanly). SIGTERM matters
+    because SLURM sends it before a walltime kill. A second signal restores
+    the default handlers so a hung cleanup path is still hard-killable.
+    Returns the flag object."""
 
     class _Flag:
         value = False
@@ -101,11 +107,13 @@ def install_abort_handler():
     def handler(signum, frame):
         if flag.value:
             signal.signal(signal.SIGINT, signal.SIG_DFL)
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
             return
         flag.value = True
         console.print("\n[yellow]Abort received; finishing the current step and writing the best model.[/yellow]")
 
     signal.signal(signal.SIGINT, handler)
+    signal.signal(signal.SIGTERM, handler)
     return flag
 
 
@@ -223,7 +231,7 @@ def resume_or_init(
     ckpt = try_resume(os.path.join(run_dir, "last.pt"), expected_hash=expected_hash)
     if ckpt is None:
         return {"global_step": 0, "epoch": 0, "best_val": -1.0, "stale_validations": 0}
-    model.load_state_dict(ckpt["model_state_dict"])
+    load_model_state(model, ckpt)
     optimizer.load_state_dict(ckpt["optimizer_state_dict"])
     # Optimizer state was just loaded onto CPU (see map_location in try_resume).
     # Move it to the params' device so the first step() doesn't hit a
@@ -296,41 +304,171 @@ def make_scheduler(optimizer, warmup_steps: int, total_steps: int):
     return LambdaLR(optimizer, lr_lambda)
 
 
-def save_checkpoint(path: str, model: nn.Module, optimizer, scheduler, **extra) -> None:
+def make_wsd_scheduler(
+    optimizer,
+    warmup_steps: int,
+    hold_end: int,
+    decay_start: int,
+    decay_end: int,
+    min_lr_frac: float = 0.1,
+):
+    """Warmup-Stable-Decay schedule for the curriculum gen parsers.
+
+    Four regions (all in optimizer steps):
+      [0, warmup_steps)        initial warmup, 0 -> peak (stabilize Adafactor/LoRA)
+      [warmup_steps, hold_end)  HOLD peak (1.0) through the subtree curriculum phases
+      [hold_end, decay_start)   re-warmup 0 -> peak into the full-document phase
+      [decay_start, decay_end)  linear decay peak -> min_lr_frac
+      [decay_end, inf)          floor at min_lr_frac
+
+    `hold_end` is the step at which the final (full-document) phase begins;
+    `decay_start = hold_end + fulldoc_warmup_steps`; `decay_end` is the last step.
+    For a single-phase (SimpleCurriculum) run set hold_end = decay_start = warmup_steps
+    so it degenerates to warmup -> linear-decay-to-floor with no re-warmup.
+    """
+
+    def lr_lambda(step):
+        if step < warmup_steps:
+            return float(step) / float(max(1, warmup_steps))
+        if step < hold_end:
+            return 1.0
+        if step < decay_start:
+            # re-warmup into the full-doc phase (0 -> peak); dips from the held peak
+            # so the biggest distribution shift is entered at a low LR.
+            return float(step - hold_end) / float(max(1, decay_start - hold_end))
+        if step < decay_end:
+            frac = float(decay_end - step) / float(max(1, decay_end - decay_start))
+            return min_lr_frac + (1.0 - min_lr_frac) * frac
+        return min_lr_frac
+
+    return LambdaLR(optimizer, lr_lambda)
+
+
+def raise_on_unexpected_keys(result) -> None:
+    """Reject a non-strict load whose checkpoint carried keys the model has no slot
+    for. Missing keys are expected (frozen base weights come from `Parser(cfg)`);
+    unexpected ones mean the checkpoint does not fit this architecture."""
+    if result.unexpected_keys:
+        preview = ", ".join(result.unexpected_keys[:5])
+        raise RuntimeError(
+            f"Trainable-only checkpoint has {len(result.unexpected_keys)} keys with no match in the "
+            f"model (e.g. {preview}). The checkpoint does not fit this architecture."
+        )
+
+
+def _trainable_state(model: nn.Module) -> dict[str, Any]:
+    """The trainable-only model state. A model may define `trainable_state_dict()` to
+    describe its own (e.g. `gen` persists compact new-row slices instead of the full
+    embedding it flags `requires_grad` purely so backward materializes a grad to
+    slice). Otherwise: the `requires_grad` parameters."""
+    fn = getattr(model, "trainable_state_dict", None)
+    if callable(fn):
+        return fn()
+    trainable = {n for n, p in model.named_parameters() if p.requires_grad}
+    return {k: v for k, v in model.state_dict().items() if k in trainable}
+
+
+def save_checkpoint(
+    path: str, model: nn.Module, optimizer, scheduler, *, trainable_only: bool = False, **extra
+) -> None:
     """Save model + training state to `path`. Also writes a `<path>.json`
     sidecar with the scalar `extra` fields so `iudex runs list` can read
     metadata without `torch.load`-ing the full checkpoint.
+
+    Both files are written to a `.tmp` sibling then `os.replace`d, so a kill
+    mid-write (SLURM walltime) never corrupts an existing checkpoint.
+
+    With `trainable_only=True` the saved model_state_dict holds only what the model
+    actually trains (frozen base weights and buffers come from `Parser(cfg)` on
+    reload) -- by default the `requires_grad` parameters, or whatever the model's
+    `trainable_state_dict()` returns. The checkpoint is marked with
+    `"trainable_only": True` so `load_model_state` knows to load non-strict.
+    Optimizer state is saved in full either way (small for LoRA runs).
     """
+    model_state = _trainable_state(model) if trainable_only else model.state_dict()
+    tmp_path = path + ".tmp"
     torch.save(
         {
-            "model_state_dict": model.state_dict(),
+            "model_state_dict": model_state,
             "optimizer_state_dict": optimizer.state_dict(),
             "scheduler_state_dict": scheduler.state_dict(),
+            "trainable_only": trainable_only,
             **extra,
         },
-        path,
+        tmp_path,
     )
+    os.replace(tmp_path, path)
     sidecar = {k: v for k, v in extra.items() if k != "config" and isinstance(v, (int, float, str, bool))}
     sidecar_path = (path[:-3] if path.endswith(".pt") else path) + ".json"
-    with open(sidecar_path, "w", encoding="utf-8") as f:
+    sidecar_tmp = sidecar_path + ".tmp"
+    with open(sidecar_tmp, "w", encoding="utf-8") as f:
         json.dump(sidecar, f, indent=2)
+    os.replace(sidecar_tmp, sidecar_path)
     wrote(path)
     wrote(sidecar_path)
 
 
-def try_resume(checkpoint_path: str, *, expected_hash: str) -> dict[str, Any] | None:
-    """Checkpoint dict iff it exists and config_hash matches, else None.
-    Mismatch warns loudly (hand-copied last.pt, or a previous hash scheme)
-    so the user can stop us before overwriting.
+def load_model_state(model: nn.Module, ckpt: dict[str, Any]) -> None:
+    """Load `ckpt["model_state_dict"]` into `model`. Full checkpoints load
+    strict, exactly as before. Trainable-only checkpoints (marked
+    `"trainable_only": True` by `save_checkpoint`) load non-strict, since the
+    frozen base weights are expected to be missing (they come fresh from
+    `Parser(cfg)`), but every key IN the checkpoint must land in the model.
+    Raises RuntimeError on unexpected keys (architecture mismatch).
+
+    A model that defined `trainable_state_dict()` reads it back through its own
+    `load_trainable_state_dict()`."""
+    state = ckpt["model_state_dict"]
+    if not ckpt.get("trainable_only", False):
+        model.load_state_dict(state)
+        return
+    fn = getattr(model, "load_trainable_state_dict", None)
+    if callable(fn):
+        fn(state)
+        return
+    raise_on_unexpected_keys(model.load_state_dict(state, strict=False))
+
+
+def _load_checkpoint_or_none(checkpoint_path: str) -> dict[str, Any] | None:
+    """`torch.load` that returns None on a corrupt or truncated file (a save
+    killed mid-write) instead of raising, with a loud warning naming the file.
     """
-    if not os.path.exists(checkpoint_path):
-        return None
     # map_location="cpu" is load-bearing: checkpoints are saved with the
     # state dicts on GPU, so without it `torch.load` restores every tensor
     # (a full duplicate of the model weights plus optimizer state) onto the
     # GPU on top of the already-constructed GPU model, transiently doubling
     # VRAM at resume and OOMing a run that trains fine from scratch.
-    ckpt = torch.load(checkpoint_path, weights_only=False, map_location="cpu")
+    # OSError belongs in the tuple: torch's PyTorchFileReader raises
+    # OSError(EINVAL), not BadZipFile, on a zip truncated mid-archive
+    # (observed with a last.pt cut at 5000 bytes).
+    try:
+        return torch.load(checkpoint_path, weights_only=False, map_location="cpu")
+    except (EOFError, OSError, RuntimeError, pickle.UnpicklingError, zipfile.BadZipFile) as e:
+        warn(
+            f"Corrupt checkpoint at [path]{checkpoint_path}[/path] "
+            f"({type(e).__name__}: {e}). Likely a save killed mid-write."
+        )
+        return None
+
+
+def try_resume(checkpoint_path: str, *, expected_hash: str) -> dict[str, Any] | None:
+    """Checkpoint dict iff it exists, loads, and config_hash matches, else None.
+    Mismatch warns loudly (hand-copied last.pt, or a previous hash scheme)
+    so the user can stop us before overwriting. A corrupt file (truncated by a
+    walltime kill mid-save) warns and falls back to the sibling best_model.pt
+    if that loads, else starts fresh. Never crashes on a bad checkpoint.
+    """
+    if not os.path.exists(checkpoint_path):
+        return None
+    ckpt = _load_checkpoint_or_none(checkpoint_path)
+    if ckpt is None:
+        best_path = os.path.join(os.path.dirname(checkpoint_path), "best_model.pt")
+        if os.path.abspath(best_path) != os.path.abspath(checkpoint_path) and os.path.exists(best_path):
+            ckpt = _load_checkpoint_or_none(best_path)
+        if ckpt is None:
+            warn("No loadable checkpoint. Starting fresh.")
+            return None
+        warn(f"Falling back to [path]{best_path}[/path] (last validated state).")
     found_hash = ckpt.get("config_hash")
     if found_hash != expected_hash:
         warn(

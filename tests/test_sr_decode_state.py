@@ -1,5 +1,5 @@
 """Unit tests for `ShiftReduceDecodeState` (the shared shift-reduce decode
-automaton used by seq2seq_sr / decoder_only_sr). Pure CPU, no model: drives
+automaton used by the unified parser's `sr` serialization). Pure CPU, no model: drives
 the state machine at the predicate/transition level and checks full traces
 against known shift-reduce action sequences."""
 

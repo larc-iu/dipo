@@ -66,33 +66,13 @@ _PARSER_META: dict[str, dict[str, str]] = {
     },
     # iudex original (no external paper): the `else` branch of render_model_card
     # supplies the intro/citation, so no `paper_*` keys.
-    "seq2seq_sr": {
-        "human_name": "seq2seq shift-reduce RST parser",
-        "module_path": "iudex.rst.parsers.seq2seq_sr.modeling_seq2seq_sr",
-        "class_name": "Seq2SeqSRParser",
-        "description": "an end-to-end RST parser that fine-tunes a seq2seq LM to generate a bottom-up "
-        "shift-reduce action sequence, with COPY-sentinel source substitution and validity-constrained decoding",
-    },
-    "decoder_only_sr": {
-        "human_name": "decoder-only shift-reduce RST parser",
-        "module_path": "iudex.rst.parsers.decoder_only_sr.modeling_decoder_only_sr",
-        "class_name": "DecoderOnlySRParser",
-        "description": "an end-to-end RST parser that fine-tunes a causal LM to generate a bottom-up shift-reduce "
-        "action sequence in a single source+actions stream, with COPY-sentinel substitution",
-    },
-    "seq2seq_sexp": {
-        "human_name": "seq2seq s-expression RST parser",
-        "module_path": "iudex.rst.parsers.seq2seq_sexp.modeling_seq2seq_sexp",
-        "class_name": "Seq2SeqSexpParser",
-        "description": "an end-to-end RST parser that fine-tunes a seq2seq LM to generate a nested s-expression "
-        "linearization of the tree, with validity-constrained decoding",
-    },
-    "decoder_only_sexp": {
-        "human_name": "decoder-only s-expression RST parser",
-        "module_path": "iudex.rst.parsers.decoder_only_sexp.modeling_decoder_only_sexp",
-        "class_name": "DecoderOnlySexpParser",
-        "description": "an end-to-end RST parser that fine-tunes a causal LM to generate a nested s-expression "
-        "linearization in a single source+tree stream",
+    "gen": {
+        "human_name": "generative RST parser",
+        "module_path": "iudex.rst.parsers.gen.modeling_gen",
+        "class_name": "GenParser",
+        "description": "an end-to-end RST parser that fine-tunes a language model to generate a linearized tree "
+        "(a bottom-up shift-reduce action sequence or a nested s-expression) and recovers segmentation + structure "
+        "from the decoded string; the backbone (encoder-decoder or causal) and serialization are config-selected",
     },
 }
 

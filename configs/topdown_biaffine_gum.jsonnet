@@ -35,5 +35,5 @@
     checkpoint_dir: 'checkpoints',
     run_name: null,
     seed: 42,
-    val_metric_name: 'span_f1',
+    val_metric_name: 'full_f1',                            // 2026-08-10: unified protocol, was 'span_f1' (reported runs)
 }

@@ -16,6 +16,8 @@ def main(parser_kind: str) -> None:
     if parser_kind not in PARSERS:
         raise ValueError(f"Unknown parser_kind: {parser_kind!r} (known: {sorted(PARSERS)})")
     spec = PARSERS[parser_kind]
+    if not spec.is_torch_model:
+        raise SystemExit(f"'{parser_kind}' is an API-client parser with no checkpoint to push.")
     config_cls = spec.load_config_cls()
 
     parser = argparse.ArgumentParser(
