@@ -290,7 +290,7 @@ class SexpSerialization(Serialization):
 
     # ---- decode ----
 
-    def _make_inner_state(self, source_ids, *, min_edu_length: int, blank_positions=frozenset()) -> SexpDecodingState:
+    def _make_inner_state(self, source_ids, *, min_edu_length: int) -> SexpDecodingState:
         # Content is always constrained to the source cursor (via the PDA's
         # `_content_legal`): free-content generation is not a supported gen mode
         # (it is the only way a decode could emit a sexp `from_sexp` rejects,
@@ -307,15 +307,10 @@ class SexpSerialization(Serialization):
             copy_id=self.copy_token_id if self.config.use_copy else None,
             source_ids=tuple() if self.config.use_copy else tuple(source_ids),
             min_edu_length=int(min_edu_length),
-            blank_positions=blank_positions,
         )
 
     def initial_state(self, source_ids):
-        return SexpDecodeState(
-            self._make_inner_state(
-                source_ids, min_edu_length=self.config.min_edu_length, blank_positions=self.blank_positions(source_ids)
-            )
-        )
+        return SexpDecodeState(self._make_inner_state(source_ids, min_edu_length=self.config.min_edu_length))
 
     def gold_initial_state(self, source_ids, gold_ranges):
         # Gold forcing pins min_edu_length=1 (the forcer assumes it; see GoldEduForcer).

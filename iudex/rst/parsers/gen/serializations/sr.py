@@ -164,10 +164,7 @@ class SRSerialization(Serialization):
     def initial_state(self, source_ids):
         min_edu_len = max(1, int(self.config.min_edu_length))
         return ShiftReduceDecodeState(
-            source_len=len(source_ids),
-            min_edu_length=min_edu_len,
-            word_label_ids=self._word_labels,
-            blank_positions=self.blank_positions(source_ids),
+            source_len=len(source_ids), min_edu_length=min_edu_len, word_label_ids=self._word_labels
         )
 
     def _set_to_mask(self, ids, vocab_size: int) -> torch.Tensor:

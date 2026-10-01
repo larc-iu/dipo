@@ -34,7 +34,6 @@ class Serialization(nn.Module):
         super().__init__()
         self.config = config
         self.tokenizer = None  # shared tokenizer, assigned by GenParser
-        self._blank_id_cache: dict[int, bool] = {}
 
     # ---- construction: vocab + scoring-head layout ----
 
@@ -179,18 +178,6 @@ class Serialization(nn.Module):
         metrics["copy_loss"] = copy_loss
         metrics["n_action_tokens"] = torch.tensor(n_structural, dtype=torch.long)
         return metrics
-
-    def blank_positions(self, source_ids) -> frozenset:
-        """Source positions whose subword decodes to whitespace only (e.g. a bare
-        space). An EDU of nothing but these would surface as "" (larc-iu/iudex#1),
-        so the pred decode states refuse to end one there. Not used under gold
-        forcing, where the boundaries are given. Empty when the source has no
-        text at all, since then there is nothing to anchor an EDU to."""
-        cache = self._blank_id_cache
-        for t in set(source_ids) - cache.keys():
-            cache[t] = not self.tokenizer.decode([t], skip_special_tokens=False).strip()
-        blank = frozenset(i for i, t in enumerate(source_ids) if cache[t])
-        return blank if len(blank) < len(source_ids) else frozenset()
 
     def initial_state(self, source_ids):
         """Fresh pred-EDU decode state for a source token sequence (wraps the
