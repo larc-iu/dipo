@@ -8,7 +8,7 @@ from typing import TypeVar
 import torch
 from tonga import Params
 
-from iudex.common.log import console
+from iudex.common.log import console, warn
 from iudex.common.training import derive_run_id, load_model_state
 from iudex.rst import HASH_EXCLUDE
 
@@ -48,6 +48,27 @@ def resolve_checkpoint(
     return derived_path
 
 
+def migrate_checkpoint_config(d: dict) -> dict:
+    """Rewrite config keys that 0c0345f (curriculum refactor) removed, so checkpoints
+    saved before it -- every larc-iu Hub model among them -- still load. Applied to
+    checkpoint configs only: a hand-written config with a stale key should still fail.
+
+    `max_epochs` moved into `SimpleCurriculum.epochs` (kept, so a re-read config still
+    describes the run's length); `checkpoint_every` was dropped when checkpointing became
+    every-epoch. (`validate_every` was dropped too but has since returned as an epoch
+    cadence, so it is left alone.)"""
+    d = dict(d)
+    migrated = [k for k in ("max_epochs", "checkpoint_every") if k in d]
+    if not migrated:
+        return d
+    d.pop("checkpoint_every", None)
+    if "max_epochs" in d:
+        max_epochs = d.pop("max_epochs")
+        d.setdefault("curriculum", {"type": "simple", "epochs": max_epochs})
+    warn(f"Migrated pre-curriculum checkpoint config key(s) {migrated}.")
+    return d
+
+
 def load_parser_from_checkpoint(
     checkpoint_path: str,
     device: torch.device,
@@ -61,7 +82,7 @@ def load_parser_from_checkpoint(
     `parser_cls(cfg)` pulls fresh base weights from HF before the non-strict
     load overlays the trained parameters."""
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    cfg = config_cls.from_dict(checkpoint["config"])
+    cfg = config_cls.from_dict(migrate_checkpoint_config(checkpoint["config"]))
     model = parser_cls(cfg, compile_encoder=compile_encoder)
     load_model_state(model, checkpoint)
     return model.to(device).eval()
