@@ -56,6 +56,7 @@ class _Frame:
     kind: Optional[str] = None  # None | 'leaf' | 'internal'
     children_emitted: int = 0  # for internal nodes (0, 1, or 2)
     leaf_token_count: int = 0  # for leaf nodes
+    leaf_has_text: bool = False  # leaf has copied a non-whitespace subword
     label_emitted: bool = False  # for internal nodes
 
 
@@ -85,6 +86,14 @@ class SexpDecodingState:
     # terminators. When non-empty, `label_ids` is unused and labels are matched
     # as token sequences through `label_cursor`.
     word_label_ids: FrozenSet[Tuple[int, ...]] = frozenset()
+
+    # Source positions whose subword decodes to whitespace only. A leaf holding
+    # nothing else would be an empty EDU, so every leaf must eat at least one
+    # TEXT position: blank positions are free to eat but do not count toward the
+    # content budget (`remaining_content`), and a leaf owes one text position
+    # until it has one. Empty (the default; gold forcing passes none) reduces
+    # every gate below to its original form.
+    blank_positions: FrozenSet[int] = frozenset()
 
     cursor: int = 0
     depth: int = 0
@@ -154,10 +163,10 @@ class SexpDecodingState:
 
     @property
     def remaining_content(self) -> int:
-        """Source positions not yet consumed by the cursor. Every leaf that
-        still has to START must consume at least one of these, so this is the
-        budget the obligation gates spend against."""
-        return self.source_len - self.cursor
+        """Text (non-blank) source positions not yet consumed by the cursor.
+        Every leaf that still has to START must consume at least one of these,
+        so this is the budget the obligation gates spend against."""
+        return self.source_len - self.cursor - sum(1 for p in self.blank_positions if p >= self.cursor)
 
     def _pending_leaf_obligation(self) -> int:
         """Minimum number of leaves that must still START (each consuming at
@@ -169,7 +178,8 @@ class SexpDecodingState:
         leaves are PART of its parent's child-obligation, not additional to it.
         Walk innermost -> outermost. The innermost frame's own minimum:
           * leaf  -> 0 (already started; a leaf frame only exists once >=1
-                       content token has been emitted)
+                       content token has been emitted), or 1 while every token
+                       it holds is blank (it still owes a text position)
           * None  -> 1 (minimally becomes a 1-token leaf)
           * internal with c children emitted -> (2 - c) remaining child
                        subtrees, each >= 1 leaf
@@ -190,7 +200,7 @@ class SexpDecodingState:
             return 0
         inner = self.stack[-1]
         if inner.kind == "leaf":
-            total = 0
+            total = 0 if inner.leaf_has_text else 1
         elif inner.kind == "internal":
             total = max(0, 2 - inner.children_emitted)
         else:  # kind is None
@@ -317,9 +327,17 @@ class SexpDecodingState:
             # sibling's min-length budget and stranding a 1-child internal node
             # (empty legal set). Same hazard `GoldEduForcer` documents for
             # min_edu>1; every shipped config pins min_edu_length=1.
-            obl_rest = self._pending_leaf_obligation()
+            #
+            # Blank positions (see `blank_positions`) cost no budget, so eating
+            # one is always safe. A leaf holding only blanks owes one text
+            # position (counted in `_pending_leaf_obligation`), which eating a
+            # text token pays, so the CONTENT gate's comparison discounts it; and
+            # `_can_close` keeps it from closing. Its eat stays legal throughout.
+            obl = self._pending_leaf_obligation()
+            owed_self = 0 if top.leaf_has_text else 1
+            obl_rest = obl - owed_self
             has_content = self.cursor < self.source_len
-            if has_content and self.remaining_content > obl_rest:
+            if has_content and (self.cursor in self.blank_positions or self.remaining_content > obl_rest):
                 legal.extend(self._content_legal())
             must_keep_eating = has_content and obl_rest == 0
             if top.leaf_token_count > 0 and self._can_close() and not must_keep_eating:
@@ -381,7 +399,7 @@ class SexpDecodingState:
         if top.kind is None:
             return False
         if top.kind == "leaf":
-            if top.leaf_token_count == 0:
+            if top.leaf_token_count == 0 or not top.leaf_has_text:
                 return False
             min_len = max(1, int(self.min_edu_length))
             at_end = self.cursor == self.source_len
@@ -503,11 +521,11 @@ class SexpDecodingState:
         if is_content:
             if top.kind == "internal":
                 raise ValueError("Source content emitted inside an internal node slot.")
-            new_top = top
+            has_text = top.leaf_has_text or self.cursor not in self.blank_positions
             if top.kind is None:
-                new_top = replace(top, kind="leaf", leaf_token_count=1)
+                new_top = replace(top, kind="leaf", leaf_token_count=1, leaf_has_text=has_text)
             else:
-                new_top = replace(top, leaf_token_count=top.leaf_token_count + 1)
+                new_top = replace(top, leaf_token_count=top.leaf_token_count + 1, leaf_has_text=has_text)
             return replace(
                 self,
                 stack=self.stack[:-1] + (new_top,),

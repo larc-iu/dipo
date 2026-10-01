@@ -327,6 +327,7 @@ class ShiftReduceDecodeState:
     cursor: int = 0
     stack_size: int = 0
     edu_length: int = 0
+    edu_has_text: bool = False  # current EDU has copied a non-whitespace subword
     edu_start: int = 0
     pred_edu_ranges: list[tuple[int, int]] = field(default_factory=list)
     done: bool = False
@@ -336,6 +337,16 @@ class ShiftReduceDecodeState:
     # In-progress label prefix; () when not mid-label. Words mode only. A REDUCE is
     # deferred until the label completes (see `words_step_full`).
     label_cursor: tuple = ()
+    # Source positions whose subword is whitespace only. SHIFT is withheld from an
+    # EDU holding nothing else (it would surface as ""), and once no text remains
+    # (`cursor >= text_end`), so trailing blanks join the final EDU instead of
+    # forming their own. COPY stays legal meanwhile, so no dead state.
+    blank_positions: frozenset = field(default_factory=frozenset)
+
+    @property
+    def text_end(self) -> int:
+        """One past the last non-blank source position."""
+        return next((i + 1 for i in range(self.source_len - 1, -1, -1) if i not in self.blank_positions), 0)
 
     def clone(self) -> "ShiftReduceDecodeState":
         """Deep-enough copy for beam expansion (the only mutable field is the
@@ -346,11 +357,13 @@ class ShiftReduceDecodeState:
             cursor=self.cursor,
             stack_size=self.stack_size,
             edu_length=self.edu_length,
+            edu_has_text=self.edu_has_text,
             edu_start=self.edu_start,
             pred_edu_ranges=list(self.pred_edu_ranges),
             done=self.done,
             word_label_ids=self.word_label_ids,
             label_cursor=self.label_cursor,
+            blank_positions=self.blank_positions,
         )
 
     # ---- words mode (label_style='words'): multi-token relation-word labels ----
@@ -399,9 +412,11 @@ class ShiftReduceDecodeState:
 
     @property
     def shift_ok(self) -> bool:
-        # At least `min_edu_length` COPYs, or end-of-source with any content so
-        # the final EDU can still be committed.
-        return self.edu_length >= self.min_edu_length or (self.at_end and self.edu_length >= 1)
+        # At least `min_edu_length` COPYs including some text, or end-of-source
+        # with any content so the final EDU can still be committed.
+        if self.at_end:
+            return self.edu_length >= 1
+        return self.edu_length >= self.min_edu_length and self.edu_has_text and self.cursor < self.text_end
 
     @property
     def reduce_ok(self) -> bool:
@@ -417,6 +432,7 @@ class ShiftReduceDecodeState:
         if self.cursor >= self.source_len:
             self.done = True
             return False
+        self.edu_has_text = self.edu_has_text or self.cursor not in self.blank_positions
         self.cursor += 1
         self.edu_length += 1
         return True
@@ -426,6 +442,7 @@ class ShiftReduceDecodeState:
         self.pred_edu_ranges.append((self.edu_start, self.cursor))
         self.edu_start = self.cursor
         self.edu_length = 0
+        self.edu_has_text = False
 
     def step_reduce(self) -> None:
         self.stack_size -= 1
