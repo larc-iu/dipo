@@ -31,7 +31,7 @@ Parse a sample document end-to-end with a pretrained DMRST model pulled from the
 
 ```bash
 iudex dmrst predict \
-    --hub-id larc-iu/dmrst-gum-12.1.0 \
+    --hub-id larc-iu/dmrst-ettin-400m-gum-12.1.0 \
     --text "Although the experiment was carefully designed, the results were inconclusive. We plan to repeat it tonight."
 ```
 This yields the parsed tree in `.rs3` format printed to `stdout`:
@@ -52,7 +52,7 @@ The same flow from Python:
 
 ```python
 from iudex.rst.parsers.dmrst.modeling_dmrst import DMRSTParser
-parser = DMRSTParser.from_pretrained("larc-iu/dmrst-gum-12.1.0")
+parser = DMRSTParser.from_pretrained("larc-iu/dmrst-ettin-400m-gum-12.1.0")
 tree = parser.predict_from_text(
     "Although the experiment was carefully designed, "
     "the results were inconclusive. "
@@ -85,7 +85,7 @@ For `--text-file` and `--input`, results are written to `--output-dir` as `.rs4`
 ```
 # From the Hub, end-to-end on a directory of .txt files:
 iudex dmrst predict \
-    --hub-id larc-iu/dmrst-gum-12.1.0 \
+    --hub-id larc-iu/dmrst-ettin-400m-gum-12.1.0 \
     --text-file path/to/docs/ \
     --output-dir out/ \
     --device cuda
