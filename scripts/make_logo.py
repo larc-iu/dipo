@@ -1,9 +1,11 @@
-"""Draw the Dipo logo, docs/logo.svg.
+"""Draw the Dipo logos, docs/logo.svg and docs/logo-square.svg.
 
 A sawtooth depot with one discourse formalism in each bay: RST, PDTB, SDRT,
-and dependency. Edit the constants below and rerun to regenerate the SVG.
+and dependency. The square version adds a station nameplate reading DIPO under
+the building, for slots that want a square picture. Edit the constants below
+and rerun to regenerate both SVGs.
 
-Usage: python scripts/make_logo.py [--output docs/logo.svg]
+Usage: python scripts/make_logo.py [--output docs/logo.svg] [--square-output docs/logo-square.svg]
 """
 
 import argparse
@@ -43,6 +45,40 @@ DEPTH = (54.0, -15.0)
 U_WALL = 0.18  # wall thickness at the doorways, as a fraction of DEPTH
 CLOCK_BAY = 2
 VENT = (1, 0.07, 0.86)  # bay, position down the slope, position back along the depth
+VIEWBOX = (8, 54, 590, 250)  # an even margin of about 12 units around the building
+
+# Square version: the building over a nameplate, on a SQUARE x SQUARE canvas.
+SQUARE = 600
+SQUARE_BUILDING_W = 540
+NAMEPLATE_GAP = 30  # between the ground line and the top of the board
+NAMEPLATE_PAD = (34, 26)  # around the lettering, horizontal and vertical
+NAMEPLATE_SIZE = 130  # lettering size in px (the font's em)
+NAMEPLATE_TRACK = 80  # extra space between letters, in font units
+# DIPO in Zilla Slab Bold (SIL Open Font License), embedded as outlines so the SVG needs
+# no font. Per glyph: advance width, ink bounds (xMin, yMin, xMax, yMax), and path, all
+# in font units (1000 per em, y up).
+NAMEPLATE_GLYPHS = {
+    "D": (
+        698,
+        (39, 0, 673, 650),
+        "M673 328Q673 180 586 90Q499 0 345 0H39V114H109V536H39V650H337Q504 650 588.5 561Q673 472 673 328Z"
+        "M529 326Q529 536 334 536H243V114H334Q428 114 478.5 164Q529 214 529 326Z",
+    ),
+    "I": (352, (39, 0, 313, 650), "M313 0H39V114H109V536H39V650H313V536H243V114H313Z"),
+    "P": (
+        598,
+        (39, 0, 584, 650),
+        "M584 438Q584 327 511.5 272.5Q439 218 343 218H243V114H343V0H39V114H109V536H39V650H337Q458 650 521 593"
+        "Q584 536 584 438ZM440 436Q440 484 413.5 510Q387 536 320 536H243V331H318Q387 331 413.5 360Q440 389 440 436Z",
+    ),
+    "O": (
+        712,
+        (24, -10, 688, 660),
+        "M688 326Q688 188 599.5 89Q511 -10 353 -10Q194 -10 109 89Q24 188 24 324Q24 466 114 563Q204 660 357 660"
+        "Q513 660 600.5 561.5Q688 463 688 326ZM543 322Q543 426 495 484Q447 542 356 542Q259 542 214 480.5"
+        "Q169 419 169 327Q169 238 213 173Q257 108 360 108Q455 108 499 167.5Q543 227 543 322Z",
+    ),
+}
 
 
 def proj(p, u=1.0):
@@ -234,7 +270,7 @@ def g_dep(cx):
 DOORS = [(b[0] + 52, 84, 182, g) for b, g in zip(BAYS, (g_rst, g_pdtb, g_sdrt, g_dep), strict=True)]
 
 
-def build():
+def building():
     body = [f"<defs>{markers()}"]
     for i, (cx, w, top, _) in enumerate(DOORS):
         body.append(f'<clipPath id="d{i}"><path d="{arch_path(cx, w, top)}"/></clipPath>')
@@ -266,20 +302,72 @@ def build():
     body.append(
         f'<line stroke="{INK}" x1="22" y1="{GROUND}" x2="584" y2="{GROUND}" stroke-width="4.5" stroke-linecap="round"/>'
     )
+    return "\n".join(body)
+
+
+def build():
+    vx, vy, vw, vh = VIEWBOX
     return (
-        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="8 54 590 250" width="590" height="250">\n'
-        + "\n".join(body)
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="{vx} {vy} {vw} {vh}" width="{vw}" height="{vh}">\n'
+        + building()
         + "\n</svg>\n"
+    )
+
+
+def nameplate_lettering(text="DIPO"):
+    # Lay the glyphs out in font units. Returns the paths and the ink box of the whole word.
+    paths, x = [], 0
+    xmin = ymin = math.inf
+    xmax = ymax = -math.inf
+    for ch in text:
+        adv, (gx0, gy0, gx1, gy1), d = NAMEPLATE_GLYPHS[ch]
+        paths.append(f'<path transform="translate({x} 0)" d="{d}"/>')
+        xmin, ymin = min(xmin, x + gx0), min(ymin, gy0)
+        xmax, ymax = max(xmax, x + gx1), max(ymax, gy1)
+        x += adv + NAMEPLATE_TRACK
+    return "".join(paths), (xmin, ymin, xmax, ymax)
+
+
+def build_square():
+    vx, vy, vw, vh = VIEWBOX
+    bw = SQUARE_BUILDING_W
+    bh = bw * vh / vw
+    k = NAMEPLATE_SIZE / 1000
+    lettering, (xmin, ymin, xmax, ymax) = nameplate_lettering()
+    tw, th = k * (xmax - xmin), k * (ymax - ymin)
+    px, py = NAMEPLATE_PAD
+    board_w, board_h = tw + 2 * px, th + 2 * py
+    top = (SQUARE - (bh + NAMEPLATE_GAP + board_h)) / 2
+    board_x, board_y = (SQUARE - board_w) / 2, top + bh + NAMEPLATE_GAP
+    # The board's outline matches the building's 4-unit lines after the building is scaled down.
+    board_sw = 4 * bw / vw
+    tx = (SQUARE - tw) / 2 - k * xmin
+    ty = board_y + py + k * ymax
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {SQUARE} {SQUARE}" width="{SQUARE}" height="{SQUARE}">\n'
+        f'<svg x="{(SQUARE - bw) / 2:.1f}" y="{top:.1f}" width="{bw}" height="{bh:.1f}" viewBox="{vx} {vy} {vw} {vh}">\n'
+        + building()
+        + "\n</svg>\n"
+        f'<rect x="{board_x:.1f}" y="{board_y:.1f}" width="{board_w:.1f}" height="{board_h:.1f}" rx="12" fill="{ROOF}" '
+        f'stroke="{INK}" stroke-width="{board_sw:.2f}"/>\n'
+        f'<g fill="{FRONT}" transform="translate({tx:.2f} {ty:.2f}) scale({k} {-k})">{lettering}</g>\n'
+        "</svg>\n"
     )
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--output", default=os.path.join(REPO, "docs", "logo.svg"), help="where to write the SVG")
+    ap.add_argument("--output", default=os.path.join(REPO, "docs", "logo.svg"), help="where to write the wide SVG")
+    ap.add_argument(
+        "--square-output",
+        default=os.path.join(REPO, "docs", "logo-square.svg"),
+        help="where to write the square SVG, with the nameplate",
+    )
     args = ap.parse_args()
-    with open(args.output, "w", encoding="utf-8") as f:
-        f.write(build())
-    wrote(os.path.abspath(args.output))
+    for path, svg in ((args.output, build()), (args.square_output, build_square())):
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(svg)
+        wrote(os.path.abspath(path))
 
 
 if __name__ == "__main__":
