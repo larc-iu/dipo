@@ -267,7 +267,7 @@ def build():
         f'<line stroke="{INK}" x1="22" y1="{GROUND}" x2="584" y2="{GROUND}" stroke-width="4.5" stroke-linecap="round"/>'
     )
     return (
-        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="14 66 586 238" width="586" height="238">\n'
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="8 54 590 250" width="590" height="250">\n'
         + "\n".join(body)
         + "\n</svg>\n"
     )
