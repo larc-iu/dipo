@@ -127,7 +127,8 @@ The `dmrst` models cannot see line breaks, so `predict_from_text` also starts a 
 Pass `break_at_paragraphs=False` to use the model's own segmentation alone.
 
 The `gen` models are built on a pretrained backbone, and loading one also downloads that backbone from the Hub.
-The two Gemma 4 models are small adapters (about 0.5 GB), so they require accepting Google's terms for `google/gemma-4-31B-it` and a GPU with roughly 70 GB of memory.
+Both backbones are gated, so before the first run accept Google's terms on the backbone's page (`google/t5gemma-2-1b-1b` for the T5Gemma models, `google/gemma-4-31B-it` for the Gemma 4 models) and log in with `huggingface-cli login` or set `HF_TOKEN`. Without that, loading fails with a "gated repo" 401 error.
+The two Gemma 4 models are small adapters (about 0.5 GB) and need a GPU with roughly 70 GB of memory, and loading one takes 1 to 2 minutes.
 The T5Gemma models store their full weights (about 4.4 GB).
 They are invoked like the others, e.g. `dipo gen predict --hub-id larc-iu/gen-sr-t5gemma-2-1b-1b-gum-12.1.0 --text "..."`.
 A document longer than a `gen` model's context window (16,384 tokens) is rejected with an error rather than silently truncated.
