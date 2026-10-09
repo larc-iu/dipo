@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import torch
 
-from iudex.rst.parsers.gen.train_gen import _normalize_window_grads
+from dipo.rst.parsers.gen.train_gen import _normalize_window_grads
 
 # Fixed per-document "losses" as a function of the model: loss_i = (w . x_i).
 # With a linear model the gradient of a mean of losses is the mean of gradients,

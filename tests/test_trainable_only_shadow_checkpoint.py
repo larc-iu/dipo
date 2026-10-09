@@ -25,12 +25,12 @@ pytest.importorskip("transformers")
 
 import torch
 
-from iudex.common.training import load_model_state, save_checkpoint
-from iudex.rst.parsers.common.inference import load_parser_from_checkpoint
-from iudex.rst.parsers.gen.configuration_gen import GenConfig
-from iudex.rst.parsers.gen.modeling_gen import NEW_ROW_KEY_PREFIX, GenParser
+from dipo.common.training import load_model_state, save_checkpoint
+from dipo.rst.parsers.common.inference import load_parser_from_checkpoint
+from dipo.rst.parsers.gen.configuration_gen import GenConfig
+from dipo.rst.parsers.gen.modeling_gen import NEW_ROW_KEY_PREFIX, GenParser
 
-SMALL_CAUSAL = os.environ.get("IUDEX_TEST_CAUSAL_MODEL", "hf-internal-testing/tiny-random-Gemma3ForCausalLM")
+SMALL_CAUSAL = os.environ.get("DIPO_TEST_CAUSAL_MODEL", "hf-internal-testing/tiny-random-Gemma3ForCausalLM")
 
 EMB_NAME = "backbone.model.model.embed_tokens.weight"
 

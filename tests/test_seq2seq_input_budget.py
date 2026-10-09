@@ -25,8 +25,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from iudex.rst.parsers.gen.backbones.seq2seq import Seq2SeqBackbone, probe_enc_specials, strip_enc_wrapper
-from iudex.rst.parsers.gen.errors import OverLengthError
+from dipo.rst.parsers.gen.backbones.seq2seq import Seq2SeqBackbone, probe_enc_specials, strip_enc_wrapper
+from dipo.rst.parsers.gen.errors import OverLengthError
 
 BOS, EOS, PAD = 2, 1, 0
 

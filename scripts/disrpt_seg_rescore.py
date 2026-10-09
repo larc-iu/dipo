@@ -11,7 +11,7 @@ DISRPT 2025 scale.
 
 Token axis: the GOLD document's whitespace tokens (per-EDU `str.split()` then
 concatenation), the same axis the paper's ICL e2e metric uses
-(iudex/rst/parsers/icl/eval_metrics.py). Gold and pred .tok files carry that
+(dipo/rst/parsers/icl/eval_metrics.py). Gold and pred .tok files carry that
 identical stream, as the scorer requires. Predicted EDU strings that do not
 reproduce the document verbatim (ICL copy drift) are projected onto the gold
 axis with the metric's own monotonic difflib projection (`n_drift` column);
@@ -46,9 +46,9 @@ import types
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from iudex.common.log import wrote  # noqa: E402
-from iudex.rst.data.reader import read_rst_file  # noqa: E402
-from iudex.rst.parsers.icl.eval_metrics import (  # noqa: E402
+from dipo.common.log import wrote  # noqa: E402
+from dipo.rst.data.reader import read_rst_file  # noqa: E402
+from dipo.rst.parsers.icl.eval_metrics import (  # noqa: E402
     _cumulative_spans,
     _project_onto_gold,
 )

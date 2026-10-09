@@ -25,12 +25,12 @@ import pytest
 
 pytest.importorskip("transformers")
 
-from iudex.rst.data.tree import Reduce, RstTree, Shift
-from iudex.rst.parsers.gen.configuration_gen import GenConfig
-from iudex.rst.parsers.gen.modeling_gen import GenParser
+from dipo.rst.data.tree import Reduce, RstTree, Shift
+from dipo.rst.parsers.gen.configuration_gen import GenConfig
+from dipo.rst.parsers.gen.modeling_gen import GenParser
 
-SMALL_SEQ2SEQ = os.environ.get("IUDEX_TEST_SEQ2SEQ_MODEL", "google-t5/t5-small")
-SMALL_CAUSAL = os.environ.get("IUDEX_TEST_CAUSAL_MODEL", "hf-internal-testing/tiny-random-Gemma3ForCausalLM")
+SMALL_SEQ2SEQ = os.environ.get("DIPO_TEST_SEQ2SEQ_MODEL", "google-t5/t5-small")
+SMALL_CAUSAL = os.environ.get("DIPO_TEST_CAUSAL_MODEL", "hf-internal-testing/tiny-random-Gemma3ForCausalLM")
 
 
 def _toy_tree() -> RstTree:
@@ -157,7 +157,7 @@ def test_evaluate_gold_edu_beam_wiring(name):
     """`_evaluate_gold_edu(..., num_beams=K)` threads the beam width through to
     `predict_with_gold_edus` and still returns the four finite gold_edu_* keys.
     Guards the shared-eval wiring that makes final eval beam-search both columns."""
-    from iudex.rst.parsers.common.generative_eval import _evaluate_gold_edu
+    from dipo.rst.parsers.common.generative_eval import _evaluate_gold_edu
 
     parser = _get_parser(name)
     pairs = [("toy.rs4", _toy_tree()), ("multi.rs4", _multi_edu_tree())]
@@ -174,7 +174,7 @@ def test_evaluate_on_dev_beam_gold_edu_matches_e2e_width():
     """End-to-end: evaluate_on_dev with eval_gold_edu=True and num_beams>1
     produces gold_edu_* keys (the gold path took the beam width, not greedy).
     One parser is enough to cover the shared orchestration."""
-    from iudex.rst.parsers.common.generative_eval import evaluate_on_dev
+    from dipo.rst.parsers.common.generative_eval import evaluate_on_dev
 
     parser = _get_parser("seq2seq_sr")
     pairs = [("toy.rs4", _toy_tree())]

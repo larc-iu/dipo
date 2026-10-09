@@ -17,8 +17,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from iudex.rst.parsers.gen.decode import beam_decode, greedy_decode
-from iudex.rst.parsers.gen.errors import OverLengthError
+from dipo.rst.parsers.gen.decode import beam_decode, greedy_decode
+from dipo.rst.parsers.gen.errors import OverLengthError
 
 STEP, EOS = 0, 1
 V = 2

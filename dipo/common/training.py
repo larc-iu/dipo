@@ -1,0 +1,613 @@
+"""Training utilities shared across parser-specific `train_<name>.py` scripts.
+
+The on-disk layout written here (`last.pt`/`last.json`,
+`best_model.pt`/`best_model.json`, `config.json`) is the contract
+`dipo.runs` reads. Frameworks that bypass these helpers don't show up
+in `dipo runs list`.
+"""
+
+import hashlib
+import json
+import logging
+import os
+import pickle
+import random
+import re
+import signal
+import zipfile
+from collections.abc import Sequence
+from typing import Any
+
+import torch
+import torch.nn as nn
+from rich.panel import Panel
+from rich.pretty import Pretty
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+)
+from rich.table import Table
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import LambdaLR
+from torch.utils.tensorboard import SummaryWriter
+
+from dipo.common.log import console, dim, warn, wrote
+
+logger = logging.getLogger(__name__)
+
+
+# Framework-agnostic fields stripped before hashing for `run_id`. Changing
+# any of these leaves an existing run resumable. Frameworks extend this
+# (e.g. `dipo.rst.HASH_EXCLUDE` adds `relation_types`) and pass the
+# combined tuple via `hash_exclude=`.
+DEFAULT_HASH_EXCLUDE: tuple[str, ...] = (
+    "run_name",
+    "checkpoint_dir",
+    "checkpoint_trainable_only",
+    "patience",
+    "patience_window",
+    "log_every",
+    "begin_validation_epoch",
+    "validate_every",
+    "val_metric_name",
+    "test_dir",
+)
+
+
+def config_hash(obj: Any) -> str:
+    """First 12 hex chars of SHA-256 over a JSON-serializable obj. Raises
+    TypeError on non-JSON values (silent `str()`-ifying would make hashes
+    platform- and Python-version-dependent)."""
+    return hashlib.sha256(json.dumps(obj, sort_keys=True).encode()).hexdigest()[:12]
+
+
+def edu_count_loss_weights(n_edus_per_doc: list[int], *, exponent: float = 1.0) -> dict[int, float]:
+    """Map each distinct document EDU-count to a per-document loss multiplier
+    proportional to `n_edus ** exponent`, normalized so the dataset MEAN weight
+    is 1.0 (keeps the effective LR/loss scale unchanged vs unweighted). Hu & Wan
+    2023 Eq. 2 uses `exponent=1` (weight proportional to #EDUs), so long/hard
+    documents get more gradient. Returned as a lookup keyed by EDU count so a
+    collator (generative parsers) or the per-tree loop (encoder parsers) can
+    resolve each document's weight cheaply. Empty input returns an empty table.
+    """
+    if not n_edus_per_doc:
+        return {}
+    raw = {n: float(n) ** exponent for n in set(n_edus_per_doc)}
+    mean_raw = sum(raw[n] for n in n_edus_per_doc) / len(n_edus_per_doc)
+    if mean_raw <= 0:
+        return {n: 1.0 for n in raw}
+    return {n: w / mean_raw for n, w in raw.items()}
+
+
+def set_seeds(seed: int) -> None:
+    """Seed torch/cuda/random and opt into TF32 matmul (no-op on non-Ampere)."""
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    random.seed(seed)
+    torch.set_float32_matmul_precision("high")
+
+
+def install_abort_handler():
+    """SIGINT/SIGTERM soft-abort. The first signal sets `flag.value = True`
+    (finish the current step, checkpoint, exit cleanly). SIGTERM matters
+    because SLURM sends it before a walltime kill. A second signal restores
+    the default handlers so a hung cleanup path is still hard-killable.
+    Returns the flag object."""
+
+    class _Flag:
+        value = False
+
+    flag = _Flag()
+
+    def handler(signum, frame):
+        if flag.value:
+            signal.signal(signal.SIGINT, signal.SIG_DFL)
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            return
+        flag.value = True
+        console.print("\n[yellow]Abort received; finishing the current step and writing the best model.[/yellow]")
+
+    signal.signal(signal.SIGINT, handler)
+    signal.signal(signal.SIGTERM, handler)
+    return flag
+
+
+def gpu_mem_gb(device: torch.device) -> tuple[float, float] | None:
+    """(allocated_gb, reserved_gb) for CUDA devices, else None."""
+    if device.type != "cuda":
+        return None
+    return (
+        torch.cuda.memory_allocated(device) / 1024**3,
+        torch.cuda.memory_reserved(device) / 1024**3,
+    )
+
+
+def derive_run_id(
+    config_dict: dict,
+    run_name: str | None = None,
+    *,
+    hash_exclude: tuple[str, ...] = DEFAULT_HASH_EXCLUDE,
+) -> tuple[str, str]:
+    """Compute the run id ("{run_name}-{hash}" or just "{hash}") and hash.
+
+    Fields named in `hash_exclude` are stripped before hashing so they don't
+    affect run identity (see `DEFAULT_HASH_EXCLUDE`). No I/O, so safe to call
+    from inference paths. Returns (run_id, cfg_hash).
+    """
+    hashable = {k: v for k, v in config_dict.items() if k not in hash_exclude}
+    cfg_hash = config_hash(hashable)
+    run_id = f"{run_name}-{cfg_hash}" if run_name else cfg_hash
+    return run_id, cfg_hash
+
+
+def prepare_run_dir(
+    config_dict: dict,
+    checkpoint_dir: str,
+    run_name: str | None = None,
+    *,
+    hash_exclude: tuple[str, ...] = DEFAULT_HASH_EXCLUDE,
+) -> tuple[str, str]:
+    """`mkdir -p` the derived run dir and return (run_dir, cfg_hash). On
+    first creation, hints at the closest sibling run (catches accidental
+    field bumps that branched into a new hash). Does NOT write
+    `config.json`. Callers do that after resolving inferred fields, so
+    the on-disk audit, embedded ckpt config, and Hub config.json all match.
+    """
+    run_id, cfg_hash = derive_run_id(config_dict, run_name, hash_exclude=hash_exclude)
+    run_dir = os.path.join(checkpoint_dir, run_id)
+    is_fresh = not os.path.exists(os.path.join(run_dir, "last.pt"))
+    os.makedirs(run_dir, exist_ok=True)
+    if is_fresh:
+        _hint_closest_sibling(run_dir, checkpoint_dir, config_dict, hash_exclude=hash_exclude)
+    return run_dir, cfg_hash
+
+
+def write_run_config(run_dir: str, config_dict: dict) -> None:
+    """Write `{run_dir}/config.json` (overwrites). Call after resolving
+    inferred fields so audit / embedded ckpt config / Hub config all match.
+    """
+    cfg_path = os.path.join(run_dir, "config.json")
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        json.dump(config_dict, f, indent=2)
+    wrote(cfg_path)
+
+
+def _hint_closest_sibling(
+    new_run_dir: str,
+    checkpoint_dir: str,
+    new_config: dict,
+    *,
+    hash_exclude: tuple[str, ...],
+) -> None:
+    """Print a hint if a sibling run differs by ≤5 hash-affecting fields."""
+    if not os.path.isdir(checkpoint_dir):
+        return
+    best: tuple[int, str, list[str]] | None = None
+    for entry in os.listdir(checkpoint_dir):
+        sibling = os.path.join(checkpoint_dir, entry)
+        if sibling == new_run_dir or not os.path.isdir(sibling):
+            continue
+        sibling_cfg_path = os.path.join(sibling, "config.json")
+        if not os.path.exists(sibling_cfg_path):
+            continue
+        try:
+            with open(sibling_cfg_path, encoding="utf-8") as f:
+                sibling_cfg = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        keys = (set(new_config) | set(sibling_cfg)) - set(hash_exclude)
+        diffs = sorted(k for k in keys if new_config.get(k) != sibling_cfg.get(k))
+        if not diffs:
+            continue
+        if best is None or len(diffs) < best[0]:
+            best = (len(diffs), entry, diffs)
+    if best is None or best[0] > 5:
+        return
+    n, run_id, diffs = best
+    field_list = ", ".join(diffs[:5]) + (f", +{len(diffs) - 5} more" if len(diffs) > 5 else "")
+    dim(
+        f"  New run. Closest existing run: [path]{run_id}[/path] "
+        f"(differs in {n} field{'s' if n != 1 else ''}: {field_list}).\n"
+        f"  If you meant to resume that, revert those fields. Otherwise this is fine."
+    )
+
+
+def resume_or_init(
+    run_dir: str,
+    *,
+    model: nn.Module,
+    optimizer,
+    scheduler,
+    expected_hash: str,
+) -> dict[str, Any]:
+    """Restore from `{run_dir}/last.pt` if hash matches, else fresh state.
+    Returns dict with keys: global_step, epoch, best_val, stale_validations.
+    """
+    ckpt = try_resume(os.path.join(run_dir, "last.pt"), expected_hash=expected_hash)
+    if ckpt is None:
+        return {"global_step": 0, "epoch": 0, "best_val": -1.0, "stale_validations": 0}
+    load_model_state(model, ckpt)
+    optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+    # Optimizer state was just loaded onto CPU (see map_location in try_resume).
+    # Move it to the params' device so the first step() doesn't hit a
+    # CPU-state vs GPU-grad device mismatch. Factored Adafactor state is tiny,
+    # so this is cheap and not a memory concern.
+    opt_device = next(model.parameters()).device
+    for opt_state in optimizer.state.values():
+        for k, v in opt_state.items():
+            if isinstance(v, torch.Tensor):
+                opt_state[k] = v.to(opt_device)
+    scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+    return {
+        "global_step": ckpt["global_step"],
+        "epoch": ckpt["epoch"],
+        "best_val": ckpt.get("best_val", -1.0),
+        "stale_validations": ckpt.get("stale_validations", 0),
+    }
+
+
+def build_optimizer(
+    model: nn.Module,
+    lr: float,
+    weight_decay: float,
+    *,
+    submodule_lrs: Sequence[tuple[nn.Module, float]] = (),
+) -> AdamW:
+    """AdamW with no-decay on biases / norm weights, plus per-submodule LRs.
+    Params in each `(submodule, sub_lr)` entry use `sub_lr` (first listed
+    wins on overlap). Everything else uses `lr`.
+
+    No-decay is shape-based (`ndim <= 1`): catches every bias and norm/scale
+    weight, including the fused 1-D parameters a name match misses (`nn.GRU`'s
+    `bias_*_l*`, `nn.MultiheadAttention`'s `in_proj_bias`, the CRF's per-tag
+    `start/end_transitions`). The CRF's 2-D `transitions` log-potential is
+    name-matched on top, since it's a structured score we don't want decayed.
+    """
+
+    def _is_no_decay(name: str, p: nn.Parameter) -> bool:
+        if p.ndim <= 1:
+            return True
+        return name.rsplit(".", 1)[-1] == "transitions"
+
+    id_to_lr: dict[int, float] = {}
+    for submod, sub_lr in submodule_lrs:
+        for p in submod.parameters():
+            id_to_lr.setdefault(id(p), sub_lr)
+
+    buckets: dict[tuple[float, bool], list[nn.Parameter]] = {}
+    for name, p in model.named_parameters():
+        bucket_lr = id_to_lr.get(id(p), lr)
+        nd = _is_no_decay(name, p)
+        buckets.setdefault((bucket_lr, nd), []).append(p)
+
+    return AdamW(
+        [
+            {"params": params, "lr": bucket_lr, "weight_decay": 0.0 if nd else weight_decay}
+            for (bucket_lr, nd), params in buckets.items()
+        ]
+    )
+
+
+def make_scheduler(optimizer, warmup_steps: int, total_steps: int):
+    """Linear warmup, then linear decay to zero."""
+
+    def lr_lambda(step):
+        if step < warmup_steps:
+            return float(step) / float(max(1, warmup_steps))
+        return max(0.0, float(total_steps - step) / float(max(1, total_steps - warmup_steps)))
+
+    return LambdaLR(optimizer, lr_lambda)
+
+
+def make_wsd_scheduler(
+    optimizer,
+    warmup_steps: int,
+    hold_end: int,
+    decay_start: int,
+    decay_end: int,
+    min_lr_frac: float = 0.1,
+):
+    """Warmup-Stable-Decay schedule for the curriculum gen parsers.
+
+    Four regions (all in optimizer steps):
+      [0, warmup_steps)        initial warmup, 0 -> peak (stabilize Adafactor/LoRA)
+      [warmup_steps, hold_end)  HOLD peak (1.0) through the subtree curriculum phases
+      [hold_end, decay_start)   re-warmup 0 -> peak into the full-document phase
+      [decay_start, decay_end)  linear decay peak -> min_lr_frac
+      [decay_end, inf)          floor at min_lr_frac
+
+    `hold_end` is the step at which the final (full-document) phase begins;
+    `decay_start = hold_end + fulldoc_warmup_steps`; `decay_end` is the last step.
+    For a single-phase (SimpleCurriculum) run set hold_end = decay_start = warmup_steps
+    so it degenerates to warmup -> linear-decay-to-floor with no re-warmup.
+    """
+
+    def lr_lambda(step):
+        if step < warmup_steps:
+            return float(step) / float(max(1, warmup_steps))
+        if step < hold_end:
+            return 1.0
+        if step < decay_start:
+            # re-warmup into the full-doc phase (0 -> peak); dips from the held peak
+            # so the biggest distribution shift is entered at a low LR.
+            return float(step - hold_end) / float(max(1, decay_start - hold_end))
+        if step < decay_end:
+            frac = float(decay_end - step) / float(max(1, decay_end - decay_start))
+            return min_lr_frac + (1.0 - min_lr_frac) * frac
+        return min_lr_frac
+
+    return LambdaLR(optimizer, lr_lambda)
+
+
+def raise_on_unexpected_keys(result) -> None:
+    """Reject a non-strict load whose checkpoint carried keys the model has no slot
+    for. Missing keys are expected (frozen base weights come from `Parser(cfg)`);
+    unexpected ones mean the checkpoint does not fit this architecture."""
+    if result.unexpected_keys:
+        preview = ", ".join(result.unexpected_keys[:5])
+        raise RuntimeError(
+            f"Trainable-only checkpoint has {len(result.unexpected_keys)} keys with no match in the "
+            f"model (e.g. {preview}). The checkpoint does not fit this architecture."
+        )
+
+
+def _trainable_state(model: nn.Module) -> dict[str, Any]:
+    """The trainable-only model state. A model may define `trainable_state_dict()` to
+    describe its own (e.g. `gen` persists compact new-row slices instead of the full
+    embedding it flags `requires_grad` purely so backward materializes a grad to
+    slice). Otherwise: the `requires_grad` parameters."""
+    fn = getattr(model, "trainable_state_dict", None)
+    if callable(fn):
+        return fn()
+    trainable = {n for n, p in model.named_parameters() if p.requires_grad}
+    return {k: v for k, v in model.state_dict().items() if k in trainable}
+
+
+def save_checkpoint(
+    path: str, model: nn.Module, optimizer, scheduler, *, trainable_only: bool = False, **extra
+) -> None:
+    """Save model + training state to `path`. Also writes a `<path>.json`
+    sidecar with the scalar `extra` fields so `dipo runs list` can read
+    metadata without `torch.load`-ing the full checkpoint.
+
+    Both files are written to a `.tmp` sibling then `os.replace`d, so a kill
+    mid-write (SLURM walltime) never corrupts an existing checkpoint.
+
+    With `trainable_only=True` the saved model_state_dict holds only what the model
+    actually trains (frozen base weights and buffers come from `Parser(cfg)` on
+    reload) -- by default the `requires_grad` parameters, or whatever the model's
+    `trainable_state_dict()` returns. The checkpoint is marked with
+    `"trainable_only": True` so `load_model_state` knows to load non-strict.
+    Optimizer state is saved in full either way (small for LoRA runs).
+    """
+    model_state = _trainable_state(model) if trainable_only else model.state_dict()
+    tmp_path = path + ".tmp"
+    torch.save(
+        {
+            "model_state_dict": model_state,
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
+            "trainable_only": trainable_only,
+            **extra,
+        },
+        tmp_path,
+    )
+    os.replace(tmp_path, path)
+    sidecar = {k: v for k, v in extra.items() if k != "config" and isinstance(v, (int, float, str, bool))}
+    sidecar_path = (path[:-3] if path.endswith(".pt") else path) + ".json"
+    sidecar_tmp = sidecar_path + ".tmp"
+    with open(sidecar_tmp, "w", encoding="utf-8") as f:
+        json.dump(sidecar, f, indent=2)
+    os.replace(sidecar_tmp, sidecar_path)
+    wrote(path)
+    wrote(sidecar_path)
+
+
+def load_model_state(model: nn.Module, ckpt: dict[str, Any]) -> None:
+    """Load `ckpt["model_state_dict"]` into `model`. Full checkpoints load
+    strict, exactly as before. Trainable-only checkpoints (marked
+    `"trainable_only": True` by `save_checkpoint`) load non-strict, since the
+    frozen base weights are expected to be missing (they come fresh from
+    `Parser(cfg)`), but every key IN the checkpoint must land in the model.
+    Raises RuntimeError on unexpected keys (architecture mismatch).
+
+    A model that defined `trainable_state_dict()` reads it back through its own
+    `load_trainable_state_dict()`."""
+    state = ckpt["model_state_dict"]
+    if not ckpt.get("trainable_only", False):
+        model.load_state_dict(state)
+        return
+    fn = getattr(model, "load_trainable_state_dict", None)
+    if callable(fn):
+        fn(state)
+        return
+    raise_on_unexpected_keys(model.load_state_dict(state, strict=False))
+
+
+def _load_checkpoint_or_none(checkpoint_path: str) -> dict[str, Any] | None:
+    """`torch.load` that returns None on a corrupt or truncated file (a save
+    killed mid-write) instead of raising, with a loud warning naming the file.
+    """
+    # map_location="cpu" is load-bearing: checkpoints are saved with the
+    # state dicts on GPU, so without it `torch.load` restores every tensor
+    # (a full duplicate of the model weights plus optimizer state) onto the
+    # GPU on top of the already-constructed GPU model, transiently doubling
+    # VRAM at resume and OOMing a run that trains fine from scratch.
+    # OSError belongs in the tuple: torch's PyTorchFileReader raises
+    # OSError(EINVAL), not BadZipFile, on a zip truncated mid-archive
+    # (observed with a last.pt cut at 5000 bytes).
+    try:
+        return torch.load(checkpoint_path, weights_only=False, map_location="cpu")
+    except (EOFError, OSError, RuntimeError, pickle.UnpicklingError, zipfile.BadZipFile) as e:
+        warn(
+            f"Corrupt checkpoint at [path]{checkpoint_path}[/path] "
+            f"({type(e).__name__}: {e}). Likely a save killed mid-write."
+        )
+        return None
+
+
+def try_resume(checkpoint_path: str, *, expected_hash: str) -> dict[str, Any] | None:
+    """Checkpoint dict iff it exists, loads, and config_hash matches, else None.
+    Mismatch warns loudly (hand-copied last.pt, or a previous hash scheme)
+    so the user can stop us before overwriting. A corrupt file (truncated by a
+    walltime kill mid-save) warns and falls back to the sibling best_model.pt
+    if that loads, else starts fresh. Never crashes on a bad checkpoint.
+    """
+    if not os.path.exists(checkpoint_path):
+        return None
+    ckpt = _load_checkpoint_or_none(checkpoint_path)
+    if ckpt is None:
+        best_path = os.path.join(os.path.dirname(checkpoint_path), "best_model.pt")
+        if os.path.abspath(best_path) != os.path.abspath(checkpoint_path) and os.path.exists(best_path):
+            ckpt = _load_checkpoint_or_none(best_path)
+        if ckpt is None:
+            warn("No loadable checkpoint. Starting fresh.")
+            return None
+        warn(f"Falling back to [path]{best_path}[/path] (last validated state).")
+    found_hash = ckpt.get("config_hash")
+    if found_hash != expected_hash:
+        warn(
+            f"Config hash mismatch on [path]{checkpoint_path}[/path] "
+            f"(checkpoint={found_hash!r}, expected={expected_hash!r}). "
+            f"Starting fresh. This run will overwrite the existing last.pt."
+        )
+        return None
+    console.print(
+        f"[bold cyan]Resuming[/bold cyan] from step {ckpt.get('global_step', '?')}, epoch {ckpt.get('epoch', '?')}"
+    )
+    return ckpt
+
+
+class TBLogger:
+    """Thin SummaryWriter wrapper writing to `{run_dir}/tb`. `log_scalars`
+    namespaces each value under `prefix/` so TensorBoard groups train/ vs dev/.
+    On resume a new event file is appended into the same dir; TensorBoard merges
+    by tag and step."""
+
+    def __init__(self, run_dir: str):
+        self.writer = SummaryWriter(log_dir=os.path.join(run_dir, "tb"))
+
+    def log_scalars(self, prefix: str, scalars: dict[str, float], step: int) -> None:
+        for name, value in scalars.items():
+            self.writer.add_scalar(f"{prefix}/{name}", value, step)
+
+    def close(self) -> None:
+        self.writer.close()
+
+
+def make_progress_bar() -> Progress:
+    """Rich Progress configured for whole-tree training."""
+    return Progress(
+        SpinnerColumn("dots"),
+        TextColumn("[epoch]Epoch {task.fields[epoch]}[/epoch]"),
+        BarColumn(bar_width=30, style="magenta", complete_style="bold magenta", finished_style="green"),
+        MofNCompleteColumn(),
+        TextColumn("[dim]|[/dim]"),
+        TextColumn("{task.fields[loss_str]}"),
+        TextColumn("{task.fields[lr_str]}"),
+        TextColumn("{task.fields[mem_str]}"),
+        TextColumn("[dim]|[/dim]"),
+        TimeElapsedColumn(),
+        TextColumn("[dim]/[/dim]"),
+        TimeRemainingColumn(),
+        TextColumn("[dim](total {task.fields[total_elapsed]})[/dim]"),
+        console=console,
+        transient=True,
+    )
+
+
+def config_panel(cfg_dict: dict) -> Panel:
+    return Panel(Pretty(cfg_dict), title="[bold cyan]Config[/bold cyan]", border_style="cyan")
+
+
+def device_panel(device: torch.device, *, seed: int, checkpoint_dir: str) -> Panel:
+    info = Table(show_header=False, padding=(0, 2), box=None)
+    info.add_column(style="bold cyan")
+    info.add_column()
+    info.add_row("Device", f"[bold]{device}[/bold]")
+    if device.type == "cuda":
+        info.add_row(
+            "GPU",
+            f"{torch.cuda.get_device_name(device)} "
+            f"([green]{torch.cuda.get_device_properties(device).total_memory / 1024**3:.1f} GB[/green])",
+        )
+    info.add_row("Seed", str(seed))
+    info.add_row("Checkpoint dir", f"[path]{checkpoint_dir}[/path]")
+    return Panel(info, title="[bold magenta]dipo[/bold magenta] trainer", border_style="magenta")
+
+
+def model_panel(model: nn.Module, *, num_train_trees: int, grad_accum: int) -> Panel:
+    n_params = sum(p.numel() for p in model.parameters())
+    n_train_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    dt = Table(show_header=False, padding=(0, 2), box=None)
+    dt.add_column(style="bold cyan")
+    dt.add_column()
+    dt.add_row("Parameters", f"[bold]{n_params:,}[/bold] total, [bold]{n_train_params:,}[/bold] trainable")
+    dt.add_row("Training trees", f"[bold]{num_train_trees:,}[/bold]")
+    dt.add_row("Grad accum", str(grad_accum))
+    return Panel(dt, title="[bold cyan]Data & Model[/bold cyan]", border_style="cyan")
+
+
+def weight_decay_panel(model: nn.Module, optimizer: AdamW) -> Panel:
+    """Summarize which parameters AdamW decays vs. exempts.
+
+    Reads the per-group `weight_decay` straight off `optimizer`, so it reflects
+    what training will actually do (not a re-derivation of the rule). Names are
+    collapsed across numeric indices (`layers.0`/`layers.1` -> `layers.N`) so the
+    exempt carve-outs (biases, norm/scale weights, GRU/MHA fused biases, CRF
+    transitions) are eyeballable. Decayed params are the weight matrices, summed.
+    """
+    id_to_name = {id(p): n for n, p in model.named_parameters()}
+
+    decayed_tensors = decayed_params = 0
+    exempt_patterns: dict[str, list[int]] = {}
+    exempt_tensors = exempt_params = 0
+    for group in optimizer.param_groups:
+        for p in group["params"]:
+            if group["weight_decay"] > 0:
+                decayed_tensors += 1
+                decayed_params += p.numel()
+            else:
+                name = re.sub(r"\d+", "N", id_to_name.get(id(p), "<unknown>"))
+                bucket = exempt_patterns.setdefault(name, [0, 0])
+                bucket[0] += 1
+                bucket[1] += p.numel()
+                exempt_tensors += 1
+                exempt_params += p.numel()
+
+    t = Table(show_header=False, padding=(0, 2), box=None)
+    t.add_column(style="bold cyan")
+    t.add_column()
+    t.add_row(
+        "Decayed", f"[bold]{decayed_tensors}[/bold] tensors ([bold]{decayed_params:,}[/bold] params), weight matrices"
+    )
+    t.add_row("Exempt", f"[bold]{exempt_tensors}[/bold] tensors ([bold]{exempt_params:,}[/bold] params)")
+    t.add_row("Exempt names", "")
+    for name, (cnt, _) in sorted(exempt_patterns.items()):
+        t.add_row("", f"[dim]{name}[/dim]" + (f" [yellow]×{cnt}[/yellow]" if cnt > 1 else ""))
+    return Panel(t, title="[bold green]Weight Decay[/bold green]", border_style="green")
+
+
+def schedule_panel(
+    *,
+    steps_per_epoch: int,
+    total_steps: int,
+    warmup_steps: int,
+    lr: float,
+    encoder_lr: float | None = None,
+) -> Panel:
+    sched = Table(show_header=False, padding=(0, 2), box=None)
+    sched.add_column(style="bold cyan")
+    sched.add_column()
+    sched.add_row("Steps/epoch", f"{steps_per_epoch:,}")
+    sched.add_row("Total steps", f"{total_steps:,}")
+    sched.add_row("Warmup steps", f"{warmup_steps:,}")
+    sched.add_row("LR", f"{lr:.2e}")
+    if encoder_lr is not None:
+        sched.add_row("Encoder LR", f"{encoder_lr:.2e}")
+    return Panel(sched, title="[bold yellow]Schedule[/bold yellow]", border_style="yellow")

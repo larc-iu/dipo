@@ -26,14 +26,14 @@ import pytest
 
 pytest.importorskip("transformers")
 
-SMALL_CAUSAL = os.environ.get("IUDEX_TEST_CAUSAL_MODEL", "hf-internal-testing/tiny-random-Gemma3ForCausalLM")
-SMALL_SEQ2SEQ = os.environ.get("IUDEX_TEST_SEQ2SEQ_MODEL", "google-t5/t5-small")
+SMALL_CAUSAL = os.environ.get("DIPO_TEST_CAUSAL_MODEL", "hf-internal-testing/tiny-random-Gemma3ForCausalLM")
+SMALL_SEQ2SEQ = os.environ.get("DIPO_TEST_SEQ2SEQ_MODEL", "google-t5/t5-small")
 
 import torch
 
-from iudex.rst.data.tree import Reduce, RstTree, Shift
-from iudex.rst.parsers.gen.configuration_gen import GenConfig
-from iudex.rst.parsers.gen.modeling_gen import GenParser
+from dipo.rst.data.tree import Reduce, RstTree, Shift
+from dipo.rst.parsers.gen.configuration_gen import GenConfig
+from dipo.rst.parsers.gen.modeling_gen import GenParser
 
 COMBOS = [("decoder_only", "sr"), ("seq2seq", "sr"), ("decoder_only", "sexp"), ("seq2seq", "sexp")]
 
@@ -138,7 +138,7 @@ def test_decode_matrix_builds_tree(backbone, serialization):
 def test_lora_build_and_forward():
     """Under LoRA the state_dict carries adapter keys and a forward pass yields a
     finite loss."""
-    from iudex.rst.parsers.common.config import PeftConfig
+    from dipo.rst.parsers.common.config import PeftConfig
 
     gen = _gen("decoder_only", "sr", peft=PeftConfig(r=4, target_modules="all-linear"))
     assert any("lora" in k.lower() for k in gen.state_dict()), "no LoRA adapter keys found"

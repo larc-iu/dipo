@@ -192,7 +192,7 @@ def launch(name: str, parser: str, cfg_path: str) -> subprocess.Popen:
     os.makedirs(LOG_DIR, exist_ok=True)
     log = open(os.path.join(LOG_DIR, f"{name}.log"), "w")
     return subprocess.Popen(
-        [PY, "-m", "iudex", parser, "train", cfg_path], cwd=REPO, stdout=log, stderr=subprocess.STDOUT
+        [PY, "-m", "dipo", parser, "train", cfg_path], cwd=REPO, stdout=log, stderr=subprocess.STDOUT
     )
 
 

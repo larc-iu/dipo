@@ -17,7 +17,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from iudex.rst.parsers.common.config import PeftConfig
+from dipo.rst.parsers.common.config import PeftConfig
 
 
 # --- config: field defaults, validation, BitsAndBytesConfig construction ------
@@ -85,7 +85,7 @@ class _FakeModel:
 def _run_decoder_init(monkeypatch, peft):
     """Drive DecoderOnlyBackbone._init_model in isolation (no tokenizer, no
     download), capturing the from_pretrained kwargs. Returns (captured, model)."""
-    from iudex.rst.parsers.gen.backbones import decoder_only as mod
+    from dipo.rst.parsers.gen.backbones import decoder_only as mod
 
     captured: dict = {}
 
@@ -141,7 +141,7 @@ def test_4bit_path_passes_bnb_config_and_skips_the_cast(monkeypatch):
 
 
 def test_seq2seq_4bit_raises_not_implemented(monkeypatch):
-    from iudex.rst.parsers.gen.backbones import seq2seq as mod
+    from dipo.rst.parsers.gen.backbones import seq2seq as mod
 
     bb = mod.Seq2SeqBackbone.__new__(mod.Seq2SeqBackbone)
     bb.config = SimpleNamespace(model_name="fake/model", amp=True, peft=PeftConfig(load_in_4bit=True))
@@ -156,7 +156,7 @@ def _run_install_peft(monkeypatch, peft):
     pytest.importorskip("peft")
     import peft as peft_mod
 
-    from iudex.rst.parsers.gen.backbones import decoder_only as mod
+    from dipo.rst.parsers.gen.backbones import decoder_only as mod
 
     calls: dict = {"prepared": False}
 
@@ -195,7 +195,7 @@ def test_install_peft_skips_kbit_prep_when_off(monkeypatch):
 def test_native_quant_path_loads_as_shipped(monkeypatch):
     """A natively-quantized checkpoint (e.g. gpt-oss mxfp4) loads with NO dtype= (which
     would trigger a dequant) and NO bnb quantization_config; it is our-side unquantized."""
-    from iudex.rst.parsers.gen.backbones import decoder_only as mod
+    from dipo.rst.parsers.gen.backbones import decoder_only as mod
 
     captured: dict = {}
 

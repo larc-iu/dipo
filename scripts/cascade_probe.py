@@ -34,15 +34,15 @@ import sys
 
 import torch
 
-from iudex.common.log import wrote
-from iudex.rst.data.reader import read_rst_dir
-from iudex.rst.parsers.common.inference import load_parser_from_checkpoint
-from iudex.rst.parsers.seq2seq_sr.configuration_seq2seq_sr import Seq2SeqSRConfig
-from iudex.rst.parsers.seq2seq_sr.modeling_seq2seq_sr import Seq2SeqSRParser
-from iudex.rst.parsers.sr_biaffine.configuration_sr_biaffine import SRBiaffineConfig
-from iudex.rst.parsers.sr_biaffine.modeling_sr_biaffine import SRBiaffineParser
-from iudex.rst.parsers.topdown_biaffine.configuration_topdown_biaffine import TopdownBiaffineConfig
-from iudex.rst.parsers.topdown_biaffine.modeling_topdown_biaffine import TopdownBiaffineParser
+from dipo.common.log import wrote
+from dipo.rst.data.reader import read_rst_dir
+from dipo.rst.parsers.common.inference import load_parser_from_checkpoint
+from dipo.rst.parsers.seq2seq_sr.configuration_seq2seq_sr import Seq2SeqSRConfig
+from dipo.rst.parsers.seq2seq_sr.modeling_seq2seq_sr import Seq2SeqSRParser
+from dipo.rst.parsers.sr_biaffine.configuration_sr_biaffine import SRBiaffineConfig
+from dipo.rst.parsers.sr_biaffine.modeling_sr_biaffine import SRBiaffineParser
+from dipo.rst.parsers.topdown_biaffine.configuration_topdown_biaffine import TopdownBiaffineConfig
+from dipo.rst.parsers.topdown_biaffine.modeling_topdown_biaffine import TopdownBiaffineParser
 
 P = {
     "sr_biaffine": (SRBiaffineConfig, SRBiaffineParser),

@@ -3,7 +3,7 @@
 // Claude Opus 4.8. No training: this config drives prompting + reconstruction.
 {
     // Data. train_dir sources the k worked in-context examples; dev/test are the
-    // eval splits (choose with `iudex icl eval --split ...`).
+    // eval splits (choose with `dipo icl eval --split ...`).
     train_dir: 'data/gum_12.1.0_notok/train',
     dev_dir: 'data/gum_12.1.0_notok/dev',
     test_dir: 'data/gum_12.1.0_notok/test',

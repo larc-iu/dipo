@@ -1,8 +1,8 @@
-"""Unit tests for the `iudex gen eval` --inference-method parser."""
+"""Unit tests for the `dipo gen eval` --inference-method parser."""
 
 import pytest
 
-from iudex.rst.parsers.gen.eval_gen import parse_inference_methods
+from dipo.rst.parsers.gen.eval_gen import parse_inference_methods
 
 
 @pytest.mark.parametrize(

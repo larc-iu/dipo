@@ -5,7 +5,7 @@ against known shift-reduce action sequences."""
 
 from __future__ import annotations
 
-from iudex.rst.parsers.common.seqgen import ShiftReduceDecodeState
+from dipo.rst.parsers.common.seqgen import ShiftReduceDecodeState
 
 
 def _drive(actions: list[str], source_len: int, min_edu_length: int = 1) -> ShiftReduceDecodeState:

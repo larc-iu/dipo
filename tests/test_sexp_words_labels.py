@@ -3,7 +3,7 @@ multi-token, prefix-free relation-word labels (a trie at each label slot) plus
 literal single-id { } brackets. Pure-PDA tests (synthetic ids, no model)."""
 import pytest
 
-from iudex.rst.parsers.common.sexp_constraints import GoldEduForcer, SexpDecodingState
+from dipo.rst.parsers.common.sexp_constraints import GoldEduForcer, SexpDecodingState
 
 OPEN, CLOSE, COPY, EOS = 1, 2, 3, 4
 # Prefix-free trie sharing a first token (10) across a 2- and a 3-token label,

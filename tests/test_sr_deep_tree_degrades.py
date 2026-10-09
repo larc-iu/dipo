@@ -18,11 +18,11 @@ import pytest
 
 pytest.importorskip("transformers")
 
-from iudex.rst.parsers.gen.configuration_gen import GenConfig
-from iudex.rst.parsers.gen.modeling_gen import GenParser
+from dipo.rst.parsers.gen.configuration_gen import GenConfig
+from dipo.rst.parsers.gen.modeling_gen import GenParser
 
-T5 = os.environ.get("IUDEX_TEST_SEQ2SEQ_MODEL", "google-t5/t5-small")
-CAUSAL = os.environ.get("IUDEX_TEST_CAUSAL_MODEL", "hf-internal-testing/tiny-random-Gemma3ForCausalLM")
+T5 = os.environ.get("DIPO_TEST_SEQ2SEQ_MODEL", "google-t5/t5-small")
+CAUSAL = os.environ.get("DIPO_TEST_CAUSAL_MODEL", "hf-internal-testing/tiny-random-Gemma3ForCausalLM")
 
 
 def _build(backbone: str, model: str) -> GenParser:

@@ -11,14 +11,14 @@ import pytest
 
 pytest.importorskip("transformers")
 
-SMALL_CAUSAL = os.environ.get("IUDEX_TEST_CAUSAL_MODEL", "hf-internal-testing/tiny-random-Gemma3ForCausalLM")
-SMALL_SEQ2SEQ = os.environ.get("IUDEX_TEST_SEQ2SEQ_MODEL", "google-t5/t5-small")
+SMALL_CAUSAL = os.environ.get("DIPO_TEST_CAUSAL_MODEL", "hf-internal-testing/tiny-random-Gemma3ForCausalLM")
+SMALL_SEQ2SEQ = os.environ.get("DIPO_TEST_SEQ2SEQ_MODEL", "google-t5/t5-small")
 
 import torch
 
-from iudex.rst.data.tree import Reduce, RstTree, Shift
-from iudex.rst.parsers.gen.configuration_gen import GenConfig
-from iudex.rst.parsers.gen.modeling_gen import GenParser
+from dipo.rst.data.tree import Reduce, RstTree, Shift
+from dipo.rst.parsers.gen.configuration_gen import GenConfig
+from dipo.rst.parsers.gen.modeling_gen import GenParser
 
 
 def _gen(backbone: str, serialization: str, **ov) -> GenParser:
@@ -149,7 +149,7 @@ def test_new_row_lr_shadows_untied_head_under_ft():
 def test_new_row_lr_optimizer_group():
     """_build_optimizer puts the new-row shadow(s) in their own group at new_row_lr (wd 0),
     with no shadow leaking into the base group."""
-    from iudex.rst.parsers.gen.train_gen import _build_optimizer
+    from dipo.rst.parsers.gen.train_gen import _build_optimizer
 
     gen = _gen("decoder_only", "sr", new_row_lr=1e-3, optimizer="adamw", lr=2e-5)
     gen.configure_new_row_training()

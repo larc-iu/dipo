@@ -5,7 +5,7 @@ compare_runs.py --gold DIR --config CONFIG_JSON --pred-a DIR --pred-b DIR
 
 Reads gold trees (relations mapped through the run config's relation_map, the
 same mapping the parsers trained against) and two dirs of predicted .rs4
-files, then runs `iudex.rst.data.metrics.paired_permutation_test` per metric
+files, then runs `dipo.rst.data.metrics.paired_permutation_test` per metric
 (span/nuc/rel/full). Use this instead of eyeballing corpus F1 deltas: on a
 37-doc split one document moves FULL F1 by ~0.03 of its own swing, so an
 unpaired comparison can't distinguish ~0.02 deltas from noise. The paired
@@ -25,9 +25,9 @@ import argparse
 import json
 import os
 
-from iudex.rst.data.metrics import compute_parseval_metrics, paired_permutation_test
-from iudex.rst.data.seg_metrics import compute_e2e_parseval
-from iudex.rst.data.reader import read_rst_dir
+from dipo.rst.data.metrics import compute_parseval_metrics, paired_permutation_test
+from dipo.rst.data.seg_metrics import compute_e2e_parseval
+from dipo.rst.data.reader import read_rst_dir
 
 
 def char_ranges(tree):

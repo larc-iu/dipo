@@ -28,7 +28,7 @@ import random
 
 import pytest
 
-from iudex.rst.parsers.common.sexp_constraints import GoldEduForcer, SexpDecodingState
+from dipo.rst.parsers.common.sexp_constraints import GoldEduForcer, SexpDecodingState
 
 
 OPEN_ID = 1
@@ -298,7 +298,7 @@ def test_exhaustive_reachable_shapes_are_all_binary_trees(traversal_order, n_lea
 
 
 def _toy_tree(n_edus: int):
-    from iudex.rst.data.tree import Reduce, RstTree, Shift
+    from dipo.rst.data.tree import Reduce, RstTree, Shift
 
     texts = ["Cats sleep.", "Dogs bark.", "Birds sing.", "Fish swim.", "Ants march."][:n_edus]
     actions = [Shift(edu_text=texts[0])]
@@ -312,13 +312,13 @@ def _build_gen_sexp(backbone: str):
     transformers = pytest.importorskip("transformers")  # noqa: F841
     import os
 
-    from iudex.rst.parsers.gen.configuration_gen import GenConfig
-    from iudex.rst.parsers.gen.modeling_gen import GenParser
+    from dipo.rst.parsers.gen.configuration_gen import GenConfig
+    from dipo.rst.parsers.gen.modeling_gen import GenParser
 
     if backbone == "seq2seq":
-        model_name = os.environ.get("IUDEX_TEST_SEQ2SEQ_MODEL", "google-t5/t5-small")
+        model_name = os.environ.get("DIPO_TEST_SEQ2SEQ_MODEL", "google-t5/t5-small")
     else:
-        model_name = os.environ.get("IUDEX_TEST_CAUSAL_MODEL", "hf-internal-testing/tiny-random-Gemma3ForCausalLM")
+        model_name = os.environ.get("DIPO_TEST_CAUSAL_MODEL", "hf-internal-testing/tiny-random-Gemma3ForCausalLM")
     d = dict(
         backbone=backbone,
         serialization="sexp",
@@ -350,7 +350,7 @@ def _build_decoder_only_sexp():
 
 @pytest.mark.parametrize("build", [_build_seq2seq_sexp, _build_decoder_only_sexp])
 def test_model_level_gold_edu_count_and_boundaries(build):
-    from iudex.rst.parsers.common.seqgen import gold_edu_source_ranges
+    from dipo.rst.parsers.common.seqgen import gold_edu_source_ranges
 
     parser = build()
     tree = _toy_tree(4)

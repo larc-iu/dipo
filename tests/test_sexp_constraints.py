@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import pytest
 
-from iudex.rst.parsers.common.sexp_constraints import SexpDecodingState
+from dipo.rst.parsers.common.sexp_constraints import SexpDecodingState
 
 
 OPEN_ID = 1

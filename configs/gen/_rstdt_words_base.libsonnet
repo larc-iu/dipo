@@ -5,7 +5,7 @@
 // serialization (relation words over the full lm_head, <label_end>-terminated).
 // num_beams=1 => the final eval is GREEDY (both e2e and gold-EDU), matching the
 // main-table decode, so final_metrics.json is the paper number with no re-eval.
-// Beam-6 is an OPTIONAL add-on: `iudex gen eval <run> --num-beams 6` writes
+// Beam-6 is an OPTIONAL add-on: `dipo gen eval <run> --num-beams 6` writes
 // final_metrics.beam6.json (does not clobber the greedy final_metrics.json).
 // Model selection: validate every OTHER epoch on the FULL dev set (validate_every=2,
 // dev_max_docs=null). Dev decode is 50-88% of wall-clock, and train loss does NOT track
