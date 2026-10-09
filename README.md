@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/logo.svg" alt="Dipo logo: a sawtooth depot with a different discourse formalism (RST, PDTB, SDRT, dependency) in each bay" width="520">
+</p>
+
 # Dipo
 
 The **<u>Di</u>scourse <u>P</u>arsing <u>O</u>mnibus** (Dipo, pronounced "depot") is a collection of easy-to-use discourse parsers and other code related to discourse parsing.
