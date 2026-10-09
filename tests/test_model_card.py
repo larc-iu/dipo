@@ -1,6 +1,8 @@
 """Model-card rendering for Hub pushes: the metrics table, the tag, and the usage example."""
 
-from dipo.rst.parsers.hfhub.hub import render_model_card
+import os
+
+from dipo.rst.parsers.hfhub.hub import CARD_LOGO, render_model_card
 
 CONFIG = {
     "model_name": "xlm-roberta-base",
@@ -79,3 +81,14 @@ def test_usage_examples_use_the_given_text():
     assert "我们在这里工作。" in text.split("### CLI")[1].split("###")[0]
     assert 'parser.predict_from_text(\n    "我们在这里工作。"\n)' in text
     assert "carefully designed" in card()
+
+
+def test_logo_sits_between_the_front_matter_and_the_title():
+    after_front = card().split("---\n\n", 1)[1]
+    assert after_front.startswith(CARD_LOGO)
+    assert after_front[len(CARD_LOGO) :].startswith("# larc-iu/example\n")
+
+
+def test_logo_url_points_at_a_file_in_this_repo():
+    path = CARD_LOGO.split("/master/", 1)[1].split('"', 1)[0]
+    assert os.path.isfile(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), path))

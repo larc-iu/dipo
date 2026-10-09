@@ -30,6 +30,14 @@ HUB_CARD_NAME = "README.md"
 
 _HUB_ID_PATTERN = re.compile(r"^[\w.\-]+/[\w.\-]+$")
 
+# The card lives on the Hub, not in this repo, so the logo is linked by absolute URL.
+CARD_LOGO = (
+    '<p align="center">\n'
+    '  <a href="https://github.com/larc-iu/dipo"><img '
+    'src="https://raw.githubusercontent.com/larc-iu/dipo/master/docs/logo.svg" alt="Dipo logo" width="200"></a>\n'
+    "</p>\n\n"
+)
+
 # Per-parser model-card metadata. `paper_*` keys present iff this parser
 # re-implements an external paper (toggles intro wording + bibtex block).
 _PARSER_META: dict[str, dict[str, str]] = {
@@ -499,4 +507,4 @@ See below for the full training configuration this model was trained with.
 {config_block}
 ```
 """
-    return front_matter + body
+    return front_matter + CARD_LOGO + body
