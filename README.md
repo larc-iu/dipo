@@ -1,8 +1,6 @@
 # Dipo
 
-The **<u>Di</u>scourse <u>P</u>arsing <u>O</u>mnibus** (Dipo, said like "depot") is a collection of easy-to-use discourse parsers and other code related to discourse parsing.
-
-Dipo was formerly called IUDEX (`larc-iudex` on PyPI, with the command `iudex`).
+The **<u>Di</u>scourse <u>P</u>arsing <u>O</u>mnibus** (Dipo, pronounced "depot") is a collection of easy-to-use discourse parsers and other code related to discourse parsing.
 
 ## Setup
 
