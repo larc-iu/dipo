@@ -16,13 +16,13 @@ import torch
 
 pytest.importorskip("transformers")
 
-from iudex.common.training import save_checkpoint  # noqa: E402
-from iudex.rst.parsers.common.inference import load_parser_from_checkpoint  # noqa: E402
-from iudex.rst.parsers.gen.configuration_gen import GenConfig  # noqa: E402
-from iudex.rst.parsers.gen.modeling_gen import GenParser  # noqa: E402
+from dipo.common.training import save_checkpoint  # noqa: E402
+from dipo.rst.parsers.common.inference import load_parser_from_checkpoint  # noqa: E402
+from dipo.rst.parsers.gen.configuration_gen import GenConfig  # noqa: E402
+from dipo.rst.parsers.gen.modeling_gen import GenParser  # noqa: E402
 
-T5 = os.environ.get("IUDEX_TEST_SEQ2SEQ_MODEL", "google-t5/t5-small")
-CAUSAL = os.environ.get("IUDEX_TEST_CAUSAL_MODEL", "hf-internal-testing/tiny-random-Gemma3ForCausalLM")
+T5 = os.environ.get("DIPO_TEST_SEQ2SEQ_MODEL", "google-t5/t5-small")
+CAUSAL = os.environ.get("DIPO_TEST_CAUSAL_MODEL", "hf-internal-testing/tiny-random-Gemma3ForCausalLM")
 
 
 def _make_parser(backbone: str, serialization: str, model: str, extra: dict) -> GenParser:

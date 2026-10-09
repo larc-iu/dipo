@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from iudex.rst.data.reader import read_rst_dir
-from iudex.rst.data.tree import (
+from dipo.rst.data.reader import read_rst_dir
+from dipo.rst.data.tree import (
     Reduce,
     RstTree,
     Shift,

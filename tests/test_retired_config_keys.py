@@ -3,7 +3,7 @@
 `use_validity_constraints` and `constrain_content` were removed from GenConfig once
 their only supported value became the only behavior. But a finished run's frozen
 config.json still carries them, and tonga rejects unknown keys -- so removing the
-fields made every pre-retirement run unloadable, `iudex gen eval` (which re-evaluates a
+fields made every pre-retirement run unloadable, `dipo gen eval` (which re-evaluates a
 run from its frozen config) included. Measured at the time: 26 of 26 archived gen runs
 failed to parse.
 
@@ -14,7 +14,7 @@ the run it came from.
 
 import pytest
 
-from iudex.rst.parsers.gen.configuration_gen import GenConfig
+from dipo.rst.parsers.gen.configuration_gen import GenConfig
 
 
 def _cfg(**over) -> dict:

@@ -59,8 +59,8 @@ from glob import glob
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from iudex.common.log import wrote  # noqa: E402
-from iudex.rst.data.reader import read_rst_file  # noqa: E402
+from dipo.common.log import wrote  # noqa: E402
+from dipo.rst.data.reader import read_rst_file  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SPLITS = ("train", "dev", "test")
@@ -395,7 +395,7 @@ def build_ert(src: str, out_root: str) -> list[str]:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", default=os.path.join(REPO, "data"), help="data root (default: <repo>/data)")
-    ap.add_argument("--work-dir", default="/tmp/iudex_multiling_src", help="where upstream repos are cloned")
+    ap.add_argument("--work-dir", default="/tmp/dipo_multiling_src", help="where upstream repos are cloned")
     ap.add_argument("--only", choices=["gcdt", "pcc", "prstc", "ert"], help="build a single corpus")
     ap.add_argument("--ert", help="directory of hand-obtained RST Basque TreeBank .rs3 files")
     args = ap.parse_args()

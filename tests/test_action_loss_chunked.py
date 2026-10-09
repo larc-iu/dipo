@@ -15,8 +15,8 @@ from types import SimpleNamespace
 import torch
 import torch.nn.functional as F
 
-import iudex.rst.parsers.gen.serializations.base as ser_base
-from iudex.rst.parsers.gen.serializations.base import Serialization
+import dipo.rst.parsers.gen.serializations.base as ser_base
+from dipo.rst.parsers.gen.serializations.base import Serialization
 
 V = 11
 STRUCTURAL = [3, 5]

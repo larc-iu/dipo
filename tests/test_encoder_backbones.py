@@ -1,5 +1,5 @@
 """CPU-only tests for the encoder-backbone loading path in
-`iudex.rst.parsers.common.encoding`.
+`dipo.rst.parsers.common.encoding`.
 
 Two contracts:
 
@@ -26,9 +26,9 @@ import types
 import pytest
 import torch
 
-from iudex.rst.parsers.common import encoding
-from iudex.rst.parsers.common.config import PeftConfig
-from iudex.rst.parsers.common.encoding import (
+from dipo.rst.parsers.common import encoding
+from dipo.rst.parsers.common.config import PeftConfig
+from dipo.rst.parsers.common.encoding import (
     _resolve_base_dtype,
     _window_sentinels,
     encode_tokens_strided,

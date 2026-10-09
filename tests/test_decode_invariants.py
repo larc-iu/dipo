@@ -21,8 +21,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from iudex.rst.parsers.gen.decode import beam_decode, greedy_decode
-from iudex.rst.parsers.gen.errors import DecodeInvariantError
+from dipo.rst.parsers.gen.decode import beam_decode, greedy_decode
+from dipo.rst.parsers.gen.errors import DecodeInvariantError
 
 # Action vocabulary for the stub automaton.
 STEP, EOS, TRAP = 0, 1, 2

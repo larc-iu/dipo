@@ -7,7 +7,7 @@ to a floor over the rest of it.
 
 import torch
 
-from iudex.common.training import make_wsd_scheduler
+from dipo.common.training import make_wsd_scheduler
 
 
 def _trace(warmup, hold_end, decay_start, decay_end, min_lr_frac=0.1):
@@ -57,6 +57,6 @@ def test_single_phase_degenerates_to_warmup_then_decay():
 
 
 def test_selection_side_fields_are_hash_excluded():
-    from iudex.common.training import DEFAULT_HASH_EXCLUDE
+    from dipo.common.training import DEFAULT_HASH_EXCLUDE
 
     assert "patience_window" in DEFAULT_HASH_EXCLUDE

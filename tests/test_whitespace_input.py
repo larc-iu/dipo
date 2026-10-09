@@ -1,4 +1,4 @@
-"""Raw-text input with line breaks (larc-iu/iudex#1) and pre-curriculum checkpoints.
+"""Raw-text input with line breaks (larc-iu/dipo#1) and pre-curriculum checkpoints.
 
 Newlines in `predict_from_text` input are out of distribution (every training doc is
 single-space joined), and DMRST's segmenter could isolate a run of `Ċ` subwords as an
@@ -12,10 +12,10 @@ Separately, every larc-iu Hub checkpoint predates 0c0345f and carries `max_epoch
 
 import pytest
 
-from iudex.rst.parsers.common.inference import migrate_checkpoint_config
-from iudex.rst.parsers.common.whitespace import collapse_whitespace, normalize_whitespace
-from iudex.rst.parsers.dmrst.configuration_dmrst import DMRSTConfig
-from iudex.rst.parsers.dmrst.modeling_dmrst import edus_from_breaks
+from dipo.rst.parsers.common.inference import migrate_checkpoint_config
+from dipo.rst.parsers.common.whitespace import collapse_whitespace, line_start_breaks, normalize_whitespace
+from dipo.rst.parsers.dmrst.configuration_dmrst import DMRSTConfig
+from dipo.rst.parsers.dmrst.modeling_dmrst import edus_from_breaks, with_forced_breaks
 
 TOKENIZER = "jhu-clsp/ettin-encoder-400m"
 
@@ -118,3 +118,57 @@ def test_hand_written_configs_still_reject_retired_keys():
     """The migration is checkpoint-only; a stale training config should still fail."""
     with pytest.raises(Exception, match="max_epochs"):
         DMRSTConfig.from_dict(_dmrst_dict(max_epochs=100))
+
+
+def test_generative_parser_rejects_empty_input_instead_of_returning_an_empty_edu():
+    """Empty or whitespace-only text used to come back as a one-EDU tree whose EDU was ""."""
+    from dipo.rst.parsers.gen.modeling_gen import GenParser
+
+    parser = object.__new__(GenParser)  # the check runs before anything on the model is touched
+    for text in ("", "   ", "\n\n \t\r\n"):
+        with pytest.raises(ValueError, match="empty or contains only whitespace"):
+            parser.predict_batch_from_texts([text])
+    with pytest.raises(ValueError, match="empty or contains only whitespace"):
+        parser.predict_batch_from_texts(["A real sentence.", ""])
+    assert parser.predict_batch_from_texts([]) == []
+
+
+def _units(text):
+    return [text[i : i + 12] for i in line_start_breaks(text)]
+
+
+def test_blank_lines_and_headings_start_units_but_hard_wrapped_prose_does_not():
+    page = "Coffee\nCoffee is a brewed drink. It is popular.\nHistory\nThe earliest evidence is old."
+    assert _units(page) == ["Coffee is a ", "The earliest"]
+    wrapped = "It is a truth universally\r\nacknowledged, that a single man in\r\npossession of a good fortune.\r\n\r\nHowever little known."
+    assert _units(wrapped) == ["However litt"]  # only the paragraph break, nothing inside the wrapped lines
+    assert _units("A wrapped line that ends mid\nsentence and continues lowercase here.") == []
+    assert _units("One long line with no newline at all.") == []
+    assert _units("Title\n\nBody text starts here.\n") == ["Body text st"]
+    assert _units("") == _units("\n\n  \n") == []
+
+
+def test_cjk_headings_are_recognised_by_character_count():
+    text = "唐朝\n唐朝是中国历史上的一個重要朝代，由唐高祖李淵所建立。\n歷史\n傳說在很久以前。"
+    assert _units(text) == ["唐朝是中国历史上的一個重", "傳說在很久以前。"]
+    assert _units("这是一行很长很长很长很长很长很长很长很长很长很长的文字\n另一行") == []  # long line before: not a heading
+
+
+def test_forced_breaks_land_before_the_token_at_the_line_start():
+    """A lone SentencePiece word marker owns the offset of the character after it, so the
+    forced break has to go before the marker, and never inside a word."""
+    transformers = pytest.importorskip("transformers")
+    tok = transformers.AutoTokenizer.from_pretrained("xlm-roberta-base")
+    from dipo.rst.parsers.common.encoding import encode_with_offsets
+
+    text = "Terminologia\n1980ko hamarkada baino lehen, ez zegoen argi.\n"
+    src, char_map = normalize_whitespace(text)
+    ids, offsets = encode_with_offsets(tok, src)
+    forced = line_start_breaks(text)
+    assert forced == [text.index("1980ko")]
+    breaks = with_forced_breaks(text, char_map, offsets, [len(ids) - 1], forced)
+    mapping, edus = edus_from_breaks(text, char_map, offsets, breaks)
+    assert edus[0] == "Terminologia" and edus[1].startswith("1980ko")
+    assert len(edus) == 2
+    # No forced positions: the breaks are unchanged.
+    assert with_forced_breaks(text, char_map, offsets, [len(ids) - 1], []) == [len(ids) - 1]

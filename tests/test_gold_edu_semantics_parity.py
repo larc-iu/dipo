@@ -19,12 +19,12 @@ import pytest
 
 pytest.importorskip("transformers")
 
-from iudex.rst.data.tree import Reduce, RstTree, Shift
-from iudex.rst.parsers.gen.configuration_gen import GenConfig
-from iudex.rst.parsers.gen.modeling_gen import GenParser
+from dipo.rst.data.tree import Reduce, RstTree, Shift
+from dipo.rst.parsers.gen.configuration_gen import GenConfig
+from dipo.rst.parsers.gen.modeling_gen import GenParser
 
-SMALL_SEQ2SEQ = os.environ.get("IUDEX_TEST_SEQ2SEQ_MODEL", "google-t5/t5-small")
-SMALL_CAUSAL = os.environ.get("IUDEX_TEST_CAUSAL_MODEL", "hf-internal-testing/tiny-random-Gemma3ForCausalLM")
+SMALL_SEQ2SEQ = os.environ.get("DIPO_TEST_SEQ2SEQ_MODEL", "google-t5/t5-small")
+SMALL_CAUSAL = os.environ.get("DIPO_TEST_CAUSAL_MODEL", "hf-internal-testing/tiny-random-Gemma3ForCausalLM")
 
 
 def _toy_tree() -> RstTree:
@@ -87,7 +87,7 @@ def test_sexp_gold_edu_strategy_uses_forcer_and_clamped_ranges():
     clamped gold ranges (no per-parser ad hoc loop, no LABEL sentinel)."""
     import inspect
 
-    from iudex.rst.parsers.gen.serializations.sexp import SexpSerialization
+    from dipo.rst.parsers.gen.serializations.sexp import SexpSerialization
 
     gold_setup = inspect.getsource(SexpSerialization.gold_initial_state)
     assert "GoldEduForcer" in gold_setup, "sexp gold_initial_state doesn't use GoldEduForcer"

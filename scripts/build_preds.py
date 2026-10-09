@@ -27,7 +27,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from iudex.common.log import wrote  # noqa: E402
+from dipo.common.log import wrote  # noqa: E402
 
 TEX = os.path.expanduser("~/papers/serial_failures/main.tex")
 ROOTS = [os.path.expanduser("~/iudex_ckpts"), os.path.expanduser("~/mnt/scratch/iudex_ckpts")]
@@ -278,7 +278,7 @@ def main() -> int:
             os.makedirs(dest_dir, exist_ok=True)
             dest = os.path.join(dest_dir, f"{name}.{cond}.rs3")
             if args.debinarize:
-                from iudex.rst.data.tree import RstTree
+                from dipo.rst.data.tree import RstTree
 
                 t = RstTree.from_rs4_string(open(os.path.join(src, f)).read())
                 open(dest, "w").write(t.debinarize().to_rs4_string())
@@ -359,7 +359,7 @@ def main() -> int:
             "`disrpt_seg_scores.tsv` re-scores every e2e cell's segmentation with the official\n"
             "DISRPT 2025 scorer (per-token BeginSeg boundary P/R/F1); regenerate it with\n"
             "`scripts/disrpt_seg_rescore.py` (which also writes the intermediate `disrpt_tok/`).\n\n"
-            "Regenerate with `scripts/build_preds.py` in the iudex repo.\n"
+            "Regenerate with `scripts/build_preds.py` in the dipo repo.\n"
         )
     wrote(os.path.abspath(rpath))
 

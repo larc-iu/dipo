@@ -9,7 +9,7 @@ silence.
 
 They cannot simply be deleted, which is why they are rejected instead of removed:
   * every archived run's config.json carries them and tonga rejects unknown keys, so
-    deleting them would make those configs unloadable (`iudex gen eval` reads a run's
+    deleting them would make those configs unloadable (`dipo gen eval` reads a run's
     frozen config.json);
   * `peft` is hashed as a nested blob -- HASH_EXCLUDE only filters TOP-LEVEL keys --
     so deleting them would change every LoRA run's id and orphan its run dir.
@@ -21,7 +21,7 @@ from dataclasses import asdict
 
 import pytest
 
-from iudex.rst.parsers.common.config import PeftConfig
+from dipo.rst.parsers.common.config import PeftConfig
 
 
 def test_defaults_are_accepted():
@@ -74,7 +74,7 @@ def test_the_fields_stay_in_the_hashed_blob():
 
 # --- the accepted option's actual effect on the trainable set --------------
 
-SMALL_CAUSAL = os.environ.get("IUDEX_TEST_CAUSAL_MODEL", "hf-internal-testing/tiny-random-Gemma3ForCausalLM")
+SMALL_CAUSAL = os.environ.get("DIPO_TEST_CAUSAL_MODEL", "hf-internal-testing/tiny-random-Gemma3ForCausalLM")
 
 
 def test_lora_trainable_set_has_no_modules_to_save_duplicate():
@@ -84,8 +84,8 @@ def test_lora_trainable_set_has_no_modules_to_save_duplicate():
     LoRA adapters + the shadow, with no `modules_to_save` copy anywhere."""
     pytest.importorskip("transformers")
     pytest.importorskip("peft")
-    from iudex.rst.parsers.gen.configuration_gen import GenConfig
-    from iudex.rst.parsers.gen.modeling_gen import GenParser
+    from dipo.rst.parsers.gen.configuration_gen import GenConfig
+    from dipo.rst.parsers.gen.modeling_gen import GenParser
 
     d = dict(
         backbone="decoder_only",

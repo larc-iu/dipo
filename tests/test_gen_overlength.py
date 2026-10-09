@@ -4,7 +4,7 @@ best-effort repair. A truncated/repaired tree scores as if the model produced it
 the whole run must stop. The training path already raises (train_gen.py); this
 pins the eval/predict mirror on both axes (source > max_input_length, and decode
 exhausting max_output_length without completing). See
-iudex/rst/parsers/gen/errors.py::OverLengthError.
+dipo/rst/parsers/gen/errors.py::OverLengthError.
 """
 
 import os
@@ -13,12 +13,12 @@ import pytest
 
 pytest.importorskip("transformers")
 
-from iudex.rst.parsers.gen.configuration_gen import GenConfig
-from iudex.rst.parsers.gen.errors import OverLengthError
-from iudex.rst.parsers.gen.modeling_gen import GenParser
+from dipo.rst.parsers.gen.configuration_gen import GenConfig
+from dipo.rst.parsers.gen.errors import OverLengthError
+from dipo.rst.parsers.gen.modeling_gen import GenParser
 
-SMALL_CAUSAL = os.environ.get("IUDEX_TEST_CAUSAL_MODEL", "hf-internal-testing/tiny-random-Gemma3ForCausalLM")
-SMALL_SEQ2SEQ = os.environ.get("IUDEX_TEST_SEQ2SEQ_MODEL", "google-t5/t5-small")
+SMALL_CAUSAL = os.environ.get("DIPO_TEST_CAUSAL_MODEL", "hf-internal-testing/tiny-random-Gemma3ForCausalLM")
+SMALL_SEQ2SEQ = os.environ.get("DIPO_TEST_SEQ2SEQ_MODEL", "google-t5/t5-small")
 
 
 def _gen(backbone, *, serialization="sr", max_input_length=128, max_output_length=256) -> GenParser:

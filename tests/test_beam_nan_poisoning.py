@@ -21,7 +21,7 @@ Covers two historical bugs:
 import torch
 import torch.nn.functional as F
 
-from iudex.rst.parsers.common.seqgen import beam_topk_step, select_best_beam
+from dipo.rst.parsers.common.seqgen import beam_topk_step, select_best_beam
 
 
 def test_dead_beam_nan_repro_without_fix():
@@ -87,9 +87,9 @@ def test_gen_beam_decode_uses_shared_beam_step():
     import os
 
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    with open(os.path.join(repo_root, "iudex/rst/parsers/gen/decode.py"), encoding="utf-8") as f:
+    with open(os.path.join(repo_root, "dipo/rst/parsers/gen/decode.py"), encoding="utf-8") as f:
         text = f.read()
     assert "beam_topk_step(beam_scores, logits, legal, K)" in text, "gen decode not using the shared beam step"
-    with open(os.path.join(repo_root, "iudex/rst/parsers/common/seqgen.py"), encoding="utf-8") as f:
+    with open(os.path.join(repo_root, "dipo/rst/parsers/common/seqgen.py"), encoding="utf-8") as f:
         seqgen = f.read()
     assert "torch.isnan(cum)" in seqgen, "NaN guard missing from beam_topk_step"

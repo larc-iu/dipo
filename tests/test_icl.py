@@ -1,4 +1,4 @@
-"""Tests for the in-context-learning parser (`iudex.rst.parsers.icl`).
+"""Tests for the in-context-learning parser (`dipo.rst.parsers.icl`).
 
 Covers the pieces that are only checked by hand otherwise: the string codecs
 (words-mode SR + sexp, both shapes, N=1), the segmentation codec, the GBNF
@@ -13,15 +13,15 @@ from pathlib import Path
 
 import pytest
 
-from iudex.rst.data.reader import infer_relation_types, read_rst_dir
-from iudex.rst.data.seg_metrics import evaluate_seg_and_e2e
-from iudex.rst.data.tree import RstTree, Shift
-from iudex.rst.parsers.common.seqgen import relation_to_words
-from iudex.rst.parsers.icl import serialize as S
-from iudex.rst.parsers.icl.configuration_icl import GrammarConfig, IclConfig, ProviderConfig
-from iudex.rst.parsers.icl.eval_icl import _gold_edu_metrics
-from iudex.rst.parsers.icl.eval_metrics import failed_seg_data, seg_data_for_doc
-from iudex.rst.parsers.icl.modeling_icl import IclParser
+from dipo.rst.data.reader import infer_relation_types, read_rst_dir
+from dipo.rst.data.seg_metrics import evaluate_seg_and_e2e
+from dipo.rst.data.tree import RstTree, Shift
+from dipo.rst.parsers.common.seqgen import relation_to_words
+from dipo.rst.parsers.icl import serialize as S
+from dipo.rst.parsers.icl.configuration_icl import GrammarConfig, IclConfig, ProviderConfig
+from dipo.rst.parsers.icl.eval_icl import _gold_edu_metrics
+from dipo.rst.parsers.icl.eval_metrics import failed_seg_data, seg_data_for_doc
+from dipo.rst.parsers.icl.modeling_icl import IclParser
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 GUM_DEV = REPO_ROOT / "data" / "gum_12.1.0_notok" / "dev"
@@ -361,7 +361,7 @@ def test_think_budget_config_guards():
 
 
 def _budget_parser(monkeypatch, **gkw):
-    import iudex.rst.parsers.icl.modeling_icl as M
+    import dipo.rst.parsers.icl.modeling_icl as M
 
     monkeypatch.setattr(M.IclParser, "_sample_examples", lambda self: [])
     return M.IclParser(
@@ -437,7 +437,7 @@ def test_budget_forcing_skips_second_call_on_natural_end(monkeypatch):
 def test_forced_calls_counted_only_when_budget_message_present(monkeypatch):
     """A forced call is a real parse from truncated reasoning, so it must be
     counted -- but only when OUR injected message is what preceded the tag."""
-    import iudex.rst.parsers.icl.modeling_icl as M
+    import dipo.rst.parsers.icl.modeling_icl as M
 
     monkeypatch.setattr(M.IclParser, "_sample_examples", lambda self: [])
     g = GrammarConfig(enabled=True, lazy=True, think_budget=1024)

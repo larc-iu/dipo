@@ -4,8 +4,8 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from iudex.rst.parsers.gen.serializations.base import Serialization
-from iudex.rst.parsers.gen.train_gen import _weighted_document_loss
+from dipo.rst.parsers.gen.serializations.base import Serialization
+from dipo.rst.parsers.gen.train_gen import _weighted_document_loss
 
 
 class _FullVocabSerialization(Serialization):

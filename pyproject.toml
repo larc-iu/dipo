@@ -3,9 +3,9 @@ requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "larc-iudex"
-version = "0.1.1"
-description = "A collection of discourse parsers and associated code focused on readability and usability."
+name = "dipo"
+version = "0.2.0"
+description = "Dipo, the Discourse Parsing Omnibus: a collection of easy-to-use discourse parsers and associated code."
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
@@ -44,18 +44,20 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/larc-iu/iudex"
-Repository = "https://github.com/larc-iu/iudex"
-Issues = "https://github.com/larc-iu/iudex/issues"
+Homepage = "https://github.com/larc-iu/dipo"
+Repository = "https://github.com/larc-iu/dipo"
+Issues = "https://github.com/larc-iu/dipo/issues"
 
 [project.scripts]
-iudex = "iudex.__main__:main"
+dipo = "dipo.__main__:main"
+# Deprecated alias for the old name, kept for a release or two.
+iudex = "dipo.__main__:main_iudex"
 
 [project.optional-dependencies]
 dev = ["ruff", "build", "twine"]
 
 [tool.setuptools.packages.find]
-include = ["iudex*"]
+include = ["dipo*"]
 
 [tool.ruff]
 line-length = 120

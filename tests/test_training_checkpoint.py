@@ -1,4 +1,4 @@
-"""Checkpoint hardening tests for iudex.common.training: atomic saves leave no
+"""Checkpoint hardening tests for dipo.common.training: atomic saves leave no
 .tmp behind, try_resume tolerates a truncated last.pt (falls back to
 best_model.pt or fresh, with a warning, never a crash), SIGTERM triggers the
 soft-abort flag, and trainable-only checkpoints round-trip (frozen weights from
@@ -16,8 +16,8 @@ import pytest
 import torch
 import torch.nn as nn
 
-import iudex.common.training as training
-from iudex.common.training import (
+import dipo.common.training as training
+from dipo.common.training import (
     install_abort_handler,
     load_model_state,
     save_checkpoint,

@@ -5,7 +5,7 @@ legality-masked decode (well-formed, gold-EDU-count-preserving tree),
 single-EDU edge cases, and a short overfit that confirms the oracle replay
 and the decoder agree (the parser can recover a tree it was trained on).
 
-Uses a small BERT-style encoder; override with IUDEX_TEST_ENCODER. The test
+Uses a small BERT-style encoder; override with DIPO_TEST_ENCODER. The test
 skips if the encoder cannot be loaded (no network / not cached), matching the
 other parser tests.
 """
@@ -18,13 +18,13 @@ pytest.importorskip("transformers")
 
 import torch
 
-from iudex.rst.data.tree import Reduce, RstTree, Shift
-from iudex.rst.parsers.sr_biaffine.configuration_sr_biaffine import SRBiaffineConfig
-from iudex.rst.parsers.sr_biaffine.modeling_sr_biaffine import SRBiaffineParser
+from dipo.rst.data.tree import Reduce, RstTree, Shift
+from dipo.rst.parsers.sr_biaffine.configuration_sr_biaffine import SRBiaffineConfig
+from dipo.rst.parsers.sr_biaffine.modeling_sr_biaffine import SRBiaffineParser
 
 # Any BERT-style encoder with CLS/SEP works. Default to a tiny random model;
-# set IUDEX_TEST_ENCODER=bert-base-uncased (or similar) to run against a cache.
-SMALL_ENCODER = os.environ.get("IUDEX_TEST_ENCODER", "hf-internal-testing/tiny-random-BertModel")
+# set DIPO_TEST_ENCODER=bert-base-uncased (or similar) to run against a cache.
+SMALL_ENCODER = os.environ.get("DIPO_TEST_ENCODER", "hf-internal-testing/tiny-random-BertModel")
 
 RELS = [("cause", "rst"), ("circumstance", "rst"), ("joint", "multinuc")]
 
