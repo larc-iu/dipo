@@ -92,12 +92,5 @@ def main():
     module.main()
 
 
-def main_iudex():
-    """Entry point of the deprecated `iudex` command, the old name of this project."""
-    sys.stderr.write("iudex: this command has been renamed to `dipo` and takes the same arguments. "
-                     "`iudex` will be removed in a future release.\n")
-    main()
-
-
 if __name__ == "__main__":
     main()

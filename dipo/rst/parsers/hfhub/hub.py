@@ -403,7 +403,8 @@ def render_model_card(
     if extra:
         extras_section = "## Notes\n\n" + "".join(f"- **{k}**: {v}\n" for k, v in extra.items()) + "\n"
 
-    config_block = json.dumps(config, indent=2, default=str)
+    # The config block is there for reproducibility, so the local directory the run lived in is left out.
+    config_block = json.dumps({k: v for k, v in config.items() if k != "checkpoint_dir"}, indent=2, default=str)
 
     front_matter = (
         "---\n"
@@ -412,7 +413,6 @@ def render_model_card(
         + (f"language:\n  - {language}\n" if language else "")
         + "tags:\n"
         "  - dipo\n"
-        "  - iudex\n"
         "  - discourse-parsing\n"
         "  - rst\n"
         f"  - {parser_kind}\n"
