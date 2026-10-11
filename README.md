@@ -27,8 +27,6 @@ git clone https://github.com/larc-iu/dipo && cd dipo
 pip install -e .
 ```
 
-The old `iudex` command still works for now, as a deprecated alias of `dipo` that prints a notice. `import iudex` is now `import dipo`.
-
 ## Quick Start with Inference
 
 Parse a sample document end-to-end with a pretrained DMRST model pulled from the HuggingFace Hub. From the command line:
@@ -108,7 +106,7 @@ dipo topdown_biaffine predict \
 ```
 
 ## Available Models
-All official Dipo model releases are [tagged with `dipo` on the HuggingFace Hub](https://huggingface.co/models?other=dipo) (they also carry the old `iudex` tag for now).
+All official Dipo model releases are [tagged with `dipo` on the HuggingFace Hub](https://huggingface.co/models?other=dipo).
 
 All of the models below parse raw text end to end (segmentation and structure) and were trained on untokenized text, so plain prose works as input.
 There is no need to tokenize it or to remove line breaks, and Chinese should be given unspaced.

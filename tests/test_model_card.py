@@ -63,13 +63,26 @@ def test_unrecognized_metrics_are_said_so_rather_than_dumped():
     assert "unrecognized format" in card(metrics={"dev": {"weird": 1}, "test": {"weird": 2}})
 
 
-def test_dipo_and_legacy_iudex_tags_and_language_are_in_the_front_matter():
+def test_dipo_tag_and_language_are_in_the_front_matter():
     front = card(language="zh").split("---")[1]
     assert "  - dipo\n" in front
-    assert "  - iudex\n" in front  # the old name stays searchable for a while
+    assert "iudex" not in front  # the project's old name is gone from the cards
     assert "library_name: dipo\n" in front
     assert "language:\n  - zh\n" in front
     assert "language:" not in card().split("---")[1]
+
+
+def test_config_block_leaves_out_the_local_checkpoint_dir():
+    text = render_model_card(
+        parser_kind="dmrst",
+        config={**CONFIG, "checkpoint_dir": "/home/someone/ckpts"},
+        checkpoint_meta={},
+        final_metrics=DMRST_METRICS,
+        repo_id="larc-iu/example",
+    )
+    assert "checkpoint_dir" not in text
+    assert "/home/someone" not in text
+    assert '"train_dir": "data/gcdt_notok/train"' in text
 
 
 def test_usage_says_how_to_install():

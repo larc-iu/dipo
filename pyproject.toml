@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dipo"
-version = "0.2.0"
+version = "0.2.1"
 description = "Dipo, the Discourse Parsing Omnibus: a collection of easy-to-use discourse parsers and associated code."
 readme = "README.md"
 license = {text = "MIT"}
@@ -50,8 +50,6 @@ Issues = "https://github.com/larc-iu/dipo/issues"
 
 [project.scripts]
 dipo = "dipo.__main__:main"
-# Deprecated alias for the old name, kept for a release or two.
-iudex = "dipo.__main__:main_iudex"
 
 [project.optional-dependencies]
 dev = ["ruff", "build", "twine"]
