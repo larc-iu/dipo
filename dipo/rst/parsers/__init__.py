@@ -76,6 +76,16 @@ PARSERS: dict[str, ParserSpec] = {
         # an explicit parser_kind="gen" stamp, which `runs list` prefers.
         signature_field="backbone",
     ),
+    # Maekawa et al. (2024): a causal LM with LoRA adapters, asked one parsing decision per
+    # prompt. Raw text through its bundled segmenter (another adapter on the same model).
+    "maekawa": ParserSpec(
+        name="maekawa",
+        package="dipo.rst.parsers.maekawa",
+        config_cls="MaekawaConfig",
+        parser_cls="MaekawaParser",
+        supports_text=True,
+        signature_field="relation_surface",
+    ),
     # In-context-learning parser: an API client, not a torch model. It has no
     # training and no checkpoint, so it owns bespoke predict_icl / eval_icl
     # commands (the shared run_predict / push / runs-list machinery does not

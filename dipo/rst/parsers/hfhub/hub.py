@@ -72,6 +72,17 @@ _PARSER_META: dict[str, dict[str, str]] = {
         "paper_venue": "Findings of EMNLP 2022",
         "paper_url": "https://aclanthology.org/2022.findings-emnlp.501/",
     },
+    "maekawa": {
+        "human_name": "Maekawa et al. LLM RST parser",
+        "module_path": "dipo.rst.parsers.maekawa.modeling_maekawa",
+        "class_name": "MaekawaParser",
+        "description": "an RST parser that asks a LoRA-adapted causal LM one parsing decision per prompt "
+        "(assumes gold EDU segmentation)",
+        "paper_title": "Can we obtain significant success in RST discourse parsing by using Large Language Models?",
+        "paper_authors": "Aru Maekawa, Tsutomu Hirao, Hidetaka Kamigaito, Manabu Okumura",
+        "paper_venue": "EACL 2024",
+        "paper_url": "https://aclanthology.org/2024.eacl-long.171/",
+    },
     # dipo original (no external paper): the `else` branch of render_model_card
     # supplies the intro/citation, so no `paper_*` keys.
     "gen": {

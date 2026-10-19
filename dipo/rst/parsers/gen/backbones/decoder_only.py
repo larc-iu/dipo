@@ -9,7 +9,7 @@ import torch.nn as nn
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from dipo.common.log import warn
-from dipo.rst.parsers.common.seqgen import warm_init_head
+from dipo.rst.parsers.common.seqgen import drop_towers, warm_init_head
 from dipo.rst.parsers.gen.backbones.base import Backbone
 from dipo.rst.parsers.gen.errors import OverLengthError
 
@@ -66,14 +66,9 @@ class DecoderOnlyBackbone(Backbone):
         else:
             quant_kwargs = {"quantization_config": bnb_config} if bnb_config is not None else {}
             model = AutoModelForCausalLM.from_pretrained(cfg.model_name, dtype=model_dtype, **quant_kwargs)
-        # Multimodal releases (Gemma 4) ship vision/audio towers this text-only
-        # parser never feeds; drop them so the state_dict stays self-consistent.
-        inner = getattr(model, "model", None)
-        for attr in ("vision_tower", "audio_tower", "multi_modal_projector"):
-            if inner is not None and getattr(inner, attr, None) is not None:
-                delattr(inner, attr)
-                setattr(inner, attr, None)
-                logger.info(f"Dropped {attr} (text-only parser, tower never receives input).")
+        # Multimodal releases (Gemma 4) ship vision/audio towers this text-only parser never
+        # feeds. Qwen's `visual` tower is kept: released checkpoints were trained with it.
+        drop_towers(model, ("vision_tower", "audio_tower", "multi_modal_projector"))
         # from_pretrained(dtype=...) can PARTIALLY cast a composite model (Gemma 4 nests a
         # text_config): a requested dtype that differs from the checkpoint's stored dtype
         # may leave some params at the stored dtype. Autocast hides the mix at train time

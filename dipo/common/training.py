@@ -383,18 +383,18 @@ def save_checkpoint(
     reload) -- by default the `requires_grad` parameters, or whatever the model's
     `trainable_state_dict()` returns. The checkpoint is marked with
     `"trainable_only": True` so `load_model_state` knows to load non-strict.
-    Optimizer state is saved in full either way (small for LoRA runs).
+    Optimizer state is saved in full either way (small for LoRA runs); pass None for
+    `optimizer` and `scheduler` to save the model alone.
     """
     model_state = _trainable_state(model) if trainable_only else model.state_dict()
     tmp_path = path + ".tmp"
+    training_state = {}
+    if optimizer is not None:
+        training_state["optimizer_state_dict"] = optimizer.state_dict()
+    if scheduler is not None:
+        training_state["scheduler_state_dict"] = scheduler.state_dict()
     torch.save(
-        {
-            "model_state_dict": model_state,
-            "optimizer_state_dict": optimizer.state_dict(),
-            "scheduler_state_dict": scheduler.state_dict(),
-            "trainable_only": trainable_only,
-            **extra,
-        },
+        {"model_state_dict": model_state, **training_state, "trainable_only": trainable_only, **extra},
         tmp_path,
     )
     os.replace(tmp_path, path)
