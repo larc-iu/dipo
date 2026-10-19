@@ -238,11 +238,11 @@ class SRSerialization(Serialization):
         elif more_edus and st.cursor >= current_end:
             kinds.add("shift")
         else:
-            if st.stack_size >= 2:
+            if st.reduce_ok:
                 kinds.add("reduce")
             if more_edus:
                 kinds.add("copy")
-            elif st.stack_size == 1:
+            elif st.stack_size == 1 or (st.segment_only and st.stack_size >= 1):
                 kinds.add("eos")
         return self._ids_for_kinds(kinds, st)
 

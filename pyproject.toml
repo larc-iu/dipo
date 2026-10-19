@@ -53,6 +53,8 @@ dipo = "dipo.__main__:main"
 
 [project.optional-dependencies]
 dev = ["ruff", "build", "twine"]
+# 4-bit NF4 bases (`peft.load_in_4bit: true`), e.g. Maekawa et al.'s QLoRA setup.
+qlora = ["bitsandbytes"]
 
 [tool.setuptools.packages.find]
 include = ["dipo*"]

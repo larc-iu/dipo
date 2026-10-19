@@ -21,7 +21,8 @@ Encoder-based parsers (`dmrst`, `topdown_biaffine`, `sr_biaffine`):
 
 Generative parser `gen` (backbone `decoder_only`|`seq2seq` × serialization `sr`|`sexp`):
 - `seqgen.py` — EDU→token alignment, beam-search primitives, KV-cache reorder, the
-  shift-reduce `ShiftReduceDecodeState`, head warm-init, word-label vocab.
+  shift-reduce `ShiftReduceDecodeState`, head warm-init, word-label vocab, and
+  `drop_towers` (multimodal towers; `maekawa` uses it too).
 - `sexp_constraints.py` — the s-expression pushdown automaton (`SexpDecodingState`) and
   `GoldEduForcer` (the `sexp` serialization).
 - `generative_eval.py` — the shared dev/test eval orchestration (`evaluate_on_dev`),

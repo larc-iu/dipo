@@ -5,8 +5,9 @@ _{sr,sexp}`) into one, dispatching on two orthogonal discriminators:
 
 - `backbone`: "seq2seq" (encoder-decoder, two-stream + cross-attn) or
   "decoder_only" (causal, single source+output stream).
-- `serialization`: "sr" (bottom-up shift-reduce action sequence) or "sexp"
-  (nested s-expression).
+- `serialization`: "sr" (bottom-up shift-reduce action sequence), "sexp"
+  (nested s-expression), or "seg" (the shift-reduce stream without reduces: an EDU
+  segmenter only).
 
 Fields that are only meaningful for one axis value are documented as such and
 validated in `__post_init__` (e.g. `chat_template` needs `backbone="decoder_only"`,
@@ -23,7 +24,7 @@ from dipo.rst.parsers.common.config import PeftConfig, parse_config_dict
 from dipo.rst.parsers.common.curriculum import Curriculum, SimpleCurriculum
 
 _BACKBONES = ("seq2seq", "decoder_only")
-_SERIALIZATIONS = ("sr", "sexp")
+_SERIALIZATIONS = ("sr", "sexp", "seg")
 
 # Knobs that existed when earlier runs were trained and no longer do; each maps to the
 # value that is now the ONLY behavior. A finished run's frozen config.json still carries
@@ -90,7 +91,7 @@ class GenConfig(FromParams):
 
     # --- Axis discriminators (what the parser dispatches on) ---
     backbone: str  # "seq2seq" | "decoder_only"
-    serialization: str  # "sr" | "sexp"
+    serialization: str  # "sr" | "sexp" | "seg"
 
     test_dir: str | None = None
 
@@ -260,8 +261,10 @@ class GenConfig(FromParams):
         if self.width_band_loss is not None and self.serialization != "sr":
             raise ValueError("width_band_loss requires serialization='sr'.")
 
-        if self.serialization == "sr" and not self.use_copy:
-            raise ValueError("serialization='sr' always copies content; use_copy must be True.")
+        if self.serialization in ("sr", "seg") and not self.use_copy:
+            raise ValueError(f"serialization={self.serialization!r} always copies content; use_copy must be True.")
+        if self.serialization == "seg" and self.label_style != "token":
+            raise ValueError("serialization='seg' has no labels; label_style must be 'token'.")
 
         # words mode copies content and moves only labels to the full lm_head, so it
         # requires use_copy=True.

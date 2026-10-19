@@ -71,7 +71,7 @@ class PeftConfig(FromParams):
     # adapters train on top (QLoRA). Lets a 70B-class decoder-only model fit on a
     # single 96GB GPU. Only wired for backbone="decoder_only" (seq2seq raises). The
     # three knobs below are the standard NF4 defaults and are inert when this is
-    # False. bitsandbytes must be installed on the training machine.
+    # False. bitsandbytes must be installed on the training machine (the `qlora` extra).
     load_in_4bit: bool = False
     bnb_4bit_quant_type: str = "nf4"
     bnb_4bit_use_double_quant: bool = True

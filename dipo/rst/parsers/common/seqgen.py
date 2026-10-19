@@ -18,11 +18,14 @@ self-contained functions the backbone/serialization strategies compose:
   reconstruction, gold-range tiling, and the single-EDU fallback tree.
 - `chunked_cross_entropy`: memory-bounded full-vocab CE (words mode at
   27-31B scale).
+- `drop_towers`: removes the vision/audio towers of a multimodal causal LM
+  (also used by the `maekawa` parser).
 
 The encoder-based parsers (`dmrst`, `topdown_biaffine`, `sr_biaffine`)
 do not use these; their shared token-encoding lives in `common/encoding.py`.
 """
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -31,6 +34,21 @@ import torch.nn.functional as F
 
 from dipo.common.log import warn
 from dipo.rst.data.tree import RstTree, Shift, ShiftReduceAction
+
+logger = logging.getLogger(__name__)
+
+
+def drop_towers(model, attrs: tuple[str, ...]) -> None:
+    """Remove `attrs` (vision/audio towers, projectors) from a multimodal causal LM's
+    inner model: a text-only parser never feeds them, and dropping them keeps LoRA's
+    "all-linear" on the text stack and the state_dict self-consistent."""
+    inner = getattr(model, "model", None)
+    for attr in attrs:
+        if inner is not None and getattr(inner, attr, None) is not None:
+            delattr(inner, attr)
+            setattr(inner, attr, None)
+            logger.info(f"Dropped {attr} (text-only parser, the tower never receives input).")
+
 
 # GNMT length-normalization exponent for beam selection (Wu et al. 2016), the
 # `select_best_beam` default.
@@ -336,6 +354,9 @@ class ShiftReduceDecodeState:
     # In-progress label prefix; () when not mid-label. Words mode only. A REDUCE is
     # deferred until the label completes (see `words_step_full`).
     label_cursor: tuple = ()
+    # Segmentation only (gen's `seg` serialization): never REDUCE, and EOS once every
+    # EDU is shifted, whatever the stack holds.
+    segment_only: bool = False
 
     def clone(self) -> "ShiftReduceDecodeState":
         """Deep-enough copy for beam expansion (the only mutable field is the
@@ -351,6 +372,7 @@ class ShiftReduceDecodeState:
             done=self.done,
             word_label_ids=self.word_label_ids,
             label_cursor=self.label_cursor,
+            segment_only=self.segment_only,
         )
 
     # ---- words mode (label_style='words'): multi-token relation-word labels ----
@@ -405,11 +427,12 @@ class ShiftReduceDecodeState:
 
     @property
     def reduce_ok(self) -> bool:
-        return self.stack_size >= 2
+        return self.stack_size >= 2 and not self.segment_only
 
     @property
     def eos_ok(self) -> bool:
-        return self.at_end and self.stack_size == 1 and self.edu_length == 0
+        done_stacking = self.stack_size >= 1 if self.segment_only else self.stack_size == 1
+        return self.at_end and done_stacking and self.edu_length == 0
 
     def step_copy(self) -> bool:
         """Consume one source token. Returns False (and marks done) if the
