@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/logo.svg" alt="Dipo logo: a sawtooth depot with a different discourse formalism (RST, PDTB, SDRT, dependency) in each bay" width="520">
+  <img src="https://raw.githubusercontent.com/larc-iu/dipo/master/docs/logo.svg" alt="Dipo logo: a sawtooth depot with a different discourse formalism (RST, PDTB, SDRT, dependency) in each bay" width="520">
 </p>
 
 # Dipo
