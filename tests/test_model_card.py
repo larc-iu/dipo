@@ -105,3 +105,9 @@ def test_logo_sits_between_the_front_matter_and_the_title():
 def test_logo_url_points_at_a_file_in_this_repo():
     path = CARD_LOGO.split("/master/", 1)[1].split('"', 1)[0]
     assert os.path.isfile(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), path))
+
+
+def test_cards_cite_the_dipo_paper_not_the_repo():
+    for text in (card("dmrst"), card("gen", GEN_METRICS)):
+        cite = text[text.index("## Citation") :]
+        assert "arxiv.org/abs/2610.17658" in cite and "gessler-dipo-2026" not in cite

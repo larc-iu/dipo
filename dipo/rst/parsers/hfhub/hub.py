@@ -38,6 +38,17 @@ CARD_LOGO = (
     "</p>\n\n"
 )
 
+# What every card asks users to cite for Dipo itself: the paper it was released with.
+DIPO_BIBTEX = """@misc{gessler-zeldes-2026-worth,
+  title         = {{Worth Their Weights? Evaluating Generative Models for Discourse Parsing}},
+  author        = {Gessler, Luke and Zeldes, Amir},
+  year          = {2026},
+  eprint        = {2610.17658},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.CL},
+  url           = {https://arxiv.org/abs/2610.17658},
+}"""
+
 # Per-parser model-card metadata. `paper_*` keys present iff this parser
 # re-implements an external paper (toggles intro wording + bibtex block).
 _PARSER_META: dict[str, dict[str, str]] = {
@@ -442,7 +453,7 @@ def render_model_card(
             f"A pretrained [{meta['human_name']}]({meta['paper_url']}) trained with "
             "[Dipo](https://github.com/larc-iu/dipo)."
         )
-        citation_block = f"""If you use this model, please cite both the underlying paper:
+        citation_block = f"""If you use this model, please cite both the paper this parser re-implements:
 
 ```bibtex
 @inproceedings{{{parser_kind}_paper,
@@ -453,30 +464,20 @@ def render_model_card(
 }}
 ```
 
-And the Dipo library:
+And the paper Dipo was released with:
 
 ```bibtex
-@misc{{gessler-dipo-2026,
-  author       = {{Gessler, Luke}},
-  title        = {{{{Dipo: The Discourse Parsing Omnibus}}}},
-  year         = {{2026}},
-  howpublished = {{\\url{{https://github.com/larc-iu/dipo}}}},
-}}
+{DIPO_BIBTEX}
 ```"""
     else:
         intro = (
             f"A pretrained {meta['human_name']} ({meta['description']}) "
             "developed and trained in [Dipo](https://github.com/larc-iu/dipo)."
         )
-        citation_block = """If you use this model, please cite the Dipo library:
+        citation_block = f"""If you use this model, please cite the paper Dipo was released with:
 
 ```bibtex
-@misc{gessler-dipo-2026,
-  author       = {Gessler, Luke},
-  title        = {{Dipo: The Discourse Parsing Omnibus}},
-  year         = {2026},
-  howpublished = {\\url{https://github.com/larc-iu/dipo}},
-}
+{DIPO_BIBTEX}
 ```"""
 
     body = f"""# {repo_id}
