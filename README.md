@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/logo.svg" alt="Dipo logo: a sawtooth depot with a different discourse formalism (RST, PDTB, SDRT, dependency) in each bay" width="520">
+  <img src="https://raw.githubusercontent.com/larc-iu/dipo/master/docs/logo.svg" alt="Dipo logo: a sawtooth depot with a different discourse formalism (RST, PDTB, SDRT, dependency) in each bay" width="520">
 </p>
 
 # Dipo
@@ -221,18 +221,21 @@ dipo topdown_biaffine push \
 
 ## Citation
 
-If you use Dipo in your research, please cite it as:
+If you use Dipo in your research, please cite the paper it was released with:
 
-> Gessler, Luke. 2026. *Dipo: The Discourse Parsing Omnibus.* https://github.com/larc-iu/dipo.
+> Gessler, Luke and Amir Zeldes. 2026. *Worth Their Weights? Evaluating Generative Models for Discourse Parsing.* arXiv:2610.17658. https://arxiv.org/abs/2610.17658
 
 BibTeX:
 
 ```bibtex
-@misc{gessler-dipo-2026,
-  author       = {Gessler, Luke},
-  title        = {{Dipo: The Discourse Parsing Omnibus}},
-  year         = {2026},
-  howpublished = {\url{https://github.com/larc-iu/dipo}},
+@misc{gessler-zeldes-2026-worth,
+  title         = {{Worth Their Weights? Evaluating Generative Models for Discourse Parsing}},
+  author        = {Gessler, Luke and Zeldes, Amir},
+  year          = {2026},
+  eprint        = {2610.17658},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.CL},
+  url           = {https://arxiv.org/abs/2610.17658},
 }
 ```
 
